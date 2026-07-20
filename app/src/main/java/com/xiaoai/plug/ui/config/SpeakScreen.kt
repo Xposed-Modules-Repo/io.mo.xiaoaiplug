@@ -31,8 +31,7 @@ fun SpeakScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                     summary = "复用小爱的 TTS，音色跟原来一致"
                 )
                 Text(
-                    text = "关掉的话只出卡片、全程不出声 —— 悬浮窗和息屏场景下基本等于没有回应，" +
-                        "除非你只在 App 里用，否则建议保持开启。",
+                    text = "关闭时小爱回复为静音",
                     fontSize = MiuixTheme.textStyles.footnote2.fontSize,
                     color = MiuixTheme.colorScheme.onBackgroundVariant,
                     modifier = Modifier.padding(horizontal = CardHorizontalPadding, vertical = 8.dp)

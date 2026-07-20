@@ -36,3 +36,5 @@ obj/
 ehthumbs.db
 Desktop.ini
 
+.vscode/settings.json
+gradle/gradle-daemon-jvm.properties

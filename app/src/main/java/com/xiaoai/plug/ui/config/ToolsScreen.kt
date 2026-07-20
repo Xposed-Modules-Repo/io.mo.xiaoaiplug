@@ -1,5 +1,7 @@
 package com.xiaoai.plug.ui.config
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -13,7 +15,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.xiaoai.plug.config.Tools
 import com.xiaoai.plug.ui.ConfigViewModel
-import com.xiaoai.plug.ui.nav.CardContentPadding
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
@@ -63,26 +64,20 @@ fun ToolsScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
         }
 
         item {
-            TextField(
-                value = keyword,
-                onValueChange = { keyword = it },
-                label = "搜索工具",
-                useLabelAsPlaceholder = true,
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-            )
-        }
-
-        item {
             Text(
                 text = "已启用 ${enabledNames.size}/${Tools.ALL.size}",
                 fontSize = MiuixTheme.textStyles.footnote1.fontSize,
                 color = MiuixTheme.colorScheme.onBackgroundVariant,
-                modifier = Modifier.padding(start = 12.dp, bottom = 4.dp)
+                modifier = Modifier.padding(start = 12.dp, top = 8.dp, bottom = 4.dp)
             )
         }
         item {
-            Card(Modifier.fillMaxWidth(), insideMargin = CardContentPadding) {
+            // 不再套 Card：TextButton 自带灰底，外面再包一层 Card 的灰底就是两层
+            // 叠在一起，两颗按钮竖排还会圆角相接，糊成一块分不清是一个控件还是两个。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 TextButton(
                     text = "全部启用",
                     onClick = {
@@ -90,12 +85,35 @@ fun ToolsScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                             c.copy(enabledTools = Tools.ALL.joinToString(",") { it.name })
                         }
                     },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.weight(1f)
                 )
                 TextButton(
                     text = "全部关闭",
                     onClick = { vm.update { it.copy(enabledTools = Tools.NONE) } },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        // 搜索框紧贴它要过滤的那份列表，放在批量开关下面
+        item {
+            TextField(
+                value = keyword,
+                onValueChange = { keyword = it },
+                label = "搜索工具",
+                useLabelAsPlaceholder = true,
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp)
+            )
+        }
+        // root 权限提示
+        item {
+            Card(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Text(
+                    text = "⚠️ 某些工具需要在root管理器中授权超级小爱root后才能调用,风险自行掂量",
+                    fontSize = MiuixTheme.textStyles.footnote2.fontSize,
+                    color = MiuixTheme.colorScheme.onBackgroundVariant,
+                    modifier = Modifier.padding(12.dp)
                 )
             }
         }
@@ -117,18 +135,7 @@ fun ToolsScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
         }
 
         if (mutating.isNotEmpty()) {
-            item { SmallTitle("会改变设备状态") }
-            item {
-                Text(
-                    // 这一组单独拎出来是有来历的：曾经出过「我们没接管、模型却照跑」
-                    // 把微信真打开了的事故，动作类工具的风险跟只读工具完全不是一回事。
-                    text = "这些工具会启动应用、改设置、动音量。只有在本轮确实由本模块接管时才会执行。" +
-                        "带 root 的还需要在 KernelSU 里给超级小爱授权。",
-                    fontSize = MiuixTheme.textStyles.footnote2.fontSize,
-                    color = MiuixTheme.colorScheme.onBackgroundVariant,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
-                )
-            }
+            item { SmallTitle("会改变设备状态（慎用）") }
             item {
                 Card(Modifier.fillMaxWidth()) {
                     mutating.forEach { spec ->

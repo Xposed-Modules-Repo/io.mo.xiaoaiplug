@@ -93,19 +93,7 @@ fun SettingsScreen(bottomInset: Dp) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(text = "XiaoAi Plug", fontWeight = FontWeight.Medium)
                 }
-                Text(
-                    text = "用你自己的 AI 接管超级小爱的对话内容，界面展示不变。",
-                    fontSize = MiuixTheme.textStyles.footnote1.fontSize,
-                    color = MiuixTheme.colorScheme.onBackgroundVariant,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-                Text(
-                    text = "改完配置需要强退并重新打开超级小爱才会生效。\n" +
-                        "探针日志：adb logcat -s XiaoAiProbe",
-                    fontSize = MiuixTheme.textStyles.footnote2.fontSize,
-                    color = MiuixTheme.colorScheme.onBackgroundVariant,
-                    modifier = Modifier.padding(top = 8.dp)
-                )
+                
             }
         }
     }

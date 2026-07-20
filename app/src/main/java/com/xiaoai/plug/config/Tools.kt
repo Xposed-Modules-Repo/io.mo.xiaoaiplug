@@ -179,8 +179,7 @@ object Tools {
 
     private val runShell = Spec(
         name = "run_shell",
-        description = "以 root 执行任意 shell 命令。**仅在没有更专用的工具可用时才用它** —— " +
-                "查 WiFi、电量、存储、网络、应用列表都有专用工具，用专用工具只需一轮。",
+        description = "以 root 执行任意 shell 命令。",
         params = listOf(Param("command", "string", "要执行的 shell 命令", required = true)),
         handler = { args, _ ->
             val cmd = args.optString("command", args.optString("cmd", "")).trim()
@@ -192,8 +191,7 @@ object Tools {
 
     private val deviceStatus = Spec(
         name = "device_status",
-        description = "一次性返回设备状态：电量与充电状态、剩余存储、内存、运行时长、机型、系统版本。" +
-                "用户问「电量」「还剩多少电」「存储满了吗」「手机型号」时用这个。",
+        description = "一次性返回设备状态：电量与充电状态、剩余存储、内存、运行时长、机型、系统版本。",
         handler = { _, _ ->
             // 一次 su 调用跑完所有采集。分五次起进程要多花近半秒。
             val raw = sh(
@@ -215,8 +213,7 @@ object Tools {
 
     private val wifiInfo = Spec(
         name = "wifi_info",
-        description = "返回当前连接的 WiFi：SSID、密码(明文)、IP、信号强度、网关；以及已保存的其他网络。" +
-                "用户问「WiFi 密码」「连的什么网」「WiFi 信号」时用这个，不要用 run_shell 自己找配置文件。",
+        description = "返回当前连接的 WiFi状态信息",
         params = listOf(
             Param("ssid", "string", "只查这个 SSID 的密码；留空表示当前连接的网络")
         ),
@@ -327,8 +324,7 @@ object Tools {
 
     private val networkInfo = Spec(
         name = "network_info",
-        description = "当前网络连接情况：连接类型(WiFi/移动数据)、本机 IP、运营商、飞行模式、外网连通性。" +
-                "用户问「有网吗」「怎么连不上网」「我的 IP」时用这个。",
+        description = "当前网络连接情况",
         handler = { _, _ ->
             sh(
                 "echo '--TYPE--'; dumpsys connectivity | grep -m3 -E 'NetworkAgentInfo|Active default';" +
@@ -353,9 +349,7 @@ object Tools {
      */
     private val topMemoryApps = Spec(
         name = "top_memory_apps",
-        description = "按内存占用(PSS)从高到低列出当前进程/应用，附带总内存与可用内存。" +
-                "用户问「什么最占内存」「谁在吃内存」「内存被谁占了」「内存还剩多少」时用这个，" +
-                "不要用 run_shell 去跑 dumpsys meminfo（输出太大会被截断）。",
+        description = "获取进程内存占用状态",
         params = listOf(
             Param("count", "integer", "返回前几名，默认 8"),
             Param("include_system", "boolean", "是否包含系统进程(system_server/systemui 等)，默认 false")
@@ -504,7 +498,7 @@ object Tools {
 
     private val listApps = Spec(
         name = "list_apps",
-        description = "列出已安装的应用(包名 + 显示名)。用户问「装了什么应用」或需要确认某个应用是否存在时用。",
+        description = "获取已安装的应用信息(包名 + 显示名)",
         params = listOf(
             Param("filter", "string", "按名称/包名过滤的关键词，留空返回全部第三方应用"),
             Param("include_system", "boolean", "是否包含系统应用，默认 false")
@@ -531,7 +525,7 @@ object Tools {
 
     private val launchApp = Spec(
         name = "launch_app",
-        description = "启动一个应用。参数可以是显示名(如「微信」)或包名。",
+        description = "启动应用",
         params = listOf(Param("name", "string", "应用显示名或包名", required = true)),
         mutating = true,
         handler = { args, ctx ->
@@ -568,8 +562,7 @@ object Tools {
      */
     private val sendMessage = Spec(
         name = "send_message",
-        description = "通过微信给某个联系人发消息。联系人名必须和微信里显示的备注/昵称**完全一致**，" +
-                "否则会失败并把候选列出来（宁可失败也不发错人）。用户说「给X发微信说Y」时用这个。",
+        description = "微信指定给某个联系人发消息。联系人名必须和微信里显示的备注/昵称**完全一致**",
         params = listOf(
             Param("contact", "string", "联系人在微信里的显示名，必须完全一致", required = true),
             Param("text", "string", "要发送的消息正文", required = true),
@@ -612,7 +605,7 @@ object Tools {
 
     private val readFile = Spec(
         name = "read_file",
-        description = "读取设备上的文本文件内容(root)。用于查看日志、配置等。",
+        description = "读取文本文件内容(root)。用于查看日志、配置等。",
         params = listOf(
             Param("path", "string", "绝对路径", required = true),
             Param("max_lines", "integer", "最多读多少行，默认 200")
@@ -629,7 +622,7 @@ object Tools {
 
     private val getSetting = Spec(
         name = "get_setting",
-        description = "读取一个系统设置项的值(Settings.System/Secure/Global)。",
+        description = "读取系统设置项的值(Settings.System/Secure/Global)。",
         params = listOf(
             Param("namespace", "string", "system / secure / global", required = true,
                 enum = listOf("system", "secure", "global")),
@@ -645,7 +638,7 @@ object Tools {
 
     private val setSetting = Spec(
         name = "set_setting",
-        description = "修改一个系统设置项。常用：screen_brightness(0-255, system)、" +
+        description = "修改系统设置项" +
                 "screen_off_timeout(毫秒, system)、airplane_mode_on(0/1, global)。",
         params = listOf(
             Param("namespace", "string", "system / secure / global", required = true,
@@ -668,7 +661,7 @@ object Tools {
 
     private val mediaControl = Spec(
         name = "media_control",
-        description = "控制正在播放的媒体：播放/暂停/下一首/上一首/停止。",
+        description = "控制正在播放的媒体",
         params = listOf(
             Param("action", "string", "动作", required = true,
                 enum = listOf("play", "pause", "toggle", "next", "previous", "stop"))
@@ -690,7 +683,7 @@ object Tools {
 
     private val setVolume = Spec(
         name = "set_volume",
-        description = "设置媒体音量百分比(0-100)，或查询当前音量。",
+        description = "设置、查询媒体音量",
         params = listOf(
             Param("percent", "integer", "目标音量百分比 0-100；不传则只返回当前音量")
         ),
@@ -715,7 +708,7 @@ object Tools {
 
     private val currentTime = Spec(
         name = "current_time",
-        description = "当前日期时间和星期。模型自己不知道现在几点，凡是涉及「今天」「现在」的都先调这个。",
+        description = "获取当前系统时间",
         handler = { _, _ ->
             val fmt = SimpleDateFormat("yyyy年M月d日 EEEE HH:mm:ss", Locale.CHINA)
             fmt.format(Date())
@@ -724,7 +717,7 @@ object Tools {
 
     private val recentNotifications = Spec(
         name = "recent_notifications",
-        description = "最近的通知(应用 + 标题 + 内容)。用户问「有什么新消息」「谁给我发消息了」时用。",
+        description = "获取最近的通知",
         handler = { _, _ ->
             sh("dumpsys notification --noredact | grep -E 'pkg=|android.title=|android.text=' | head -n 60")
         }
