@@ -1,11 +1,14 @@
 package com.xiaoai.plug.ui.settings
 
+import android.content.Intent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.core.net.toUri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -31,6 +34,8 @@ import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.basic.TabRowDefaults
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+
+private const val SOURCE_URL = "https://github.com/lm060719/XiaoAi-plug"
 
 @Composable
 fun SettingsScreen(bottomInset: Dp) {
@@ -93,7 +98,29 @@ fun SettingsScreen(bottomInset: Dp) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(text = "XiaoAi Plug", fontWeight = FontWeight.Medium)
                 }
-                
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // clip 要在 clickable 之前，否则水波纹是方的、会溢出卡片圆角。
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable {
+                            // 没装浏览器 / 被策略拦掉都会抛 ActivityNotFoundException，
+                            // 这只是个跳转，崩掉设置页不值当。
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, SOURCE_URL.toUri())
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "在 GitHub 上查看源码",
+                        color = MiuixTheme.colorScheme.primary
+                    )
+                }
             }
         }
     }

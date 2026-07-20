@@ -59,7 +59,7 @@ object Tools {
 
     val ALL: List<Spec> by lazy {
         listOf(
-            runShell, deviceStatus, wifiInfo, networkInfo, topMemoryApps,
+            runShell, deviceStatus, wifiInfo, networkInfo, topMemoryApps, topStorageApps,
             listApps, launchApp, sendMessage, readFile,
             getSetting, setSetting,
             mediaControl, setVolume,
@@ -493,6 +493,178 @@ object Tools {
     private fun mb(kb: Long): String =
         if (kb >= 1024L * 1024) String.format(Locale.US, "%.1fGB", kb / 1024.0 / 1024.0)
         else "${kb / 1024}MB"
+
+    // ---------------------------------------------------------------- 存储占用
+
+    /**
+     * "哪些应用最占存储"。和 top_memory_apps 是同一个坑的另一半:没有专用工具时
+     * 模型只能拿 run_shell 硬凑,而这件事在 shell 里**没有一条便宜的路** ——
+     * 拿 `du` 递归 /data/data 要遍历几十万个文件,实测直接撞穿 SHELL_TIMEOUT_SEC(15s)
+     * 只回半截;`pm list packages` 只有包名没有体积;`dumpsys package` 几十万字符,
+     * 一返回就被 MAX_TOOL_OUTPUT(6000)拦腰截断。模型于是换着命令重试,
+     * 六轮 MAX_TOOL_ITERATIONS 烧光,用户看到的就是"工具调用超过上限,未得到最终答案"。
+     *
+     * 正路是 StorageStatsManager:它读的是**内核 quota 记账**(和"设置-存储"里那个
+     * 数字同源),完全不遍历文件,一个包一次 binder 就同时拿到 apk / 数据 / 缓存三个数。
+     */
+    private val topStorageApps = Spec(
+        name = "top_storage_apps",
+        description = "获取各应用占用的存储空间",
+        params = listOf(
+            Param("count", "integer", "返回前几名，默认 8"),
+            Param("include_system", "boolean", "是否包含系统应用，默认 false")
+        ),
+        handler = { args, ctx -> topStorage(args, ctx) }
+    )
+
+    /** 单个应用的体积。`data` 含 `cache`(两条数据源都是这个语义),所以 total = app + data。 */
+    private data class AppSize(val pkg: String, val app: Long, val data: Long, val cache: Long)
+
+    /** 扫描结果。`partial` = 预算烧完提前收工,排名可能不全,得对用户讲明。 */
+    private class StorageScan(val apps: List<AppSize>, val partial: Boolean)
+
+    /** quota 没开时 queryStatsForPackage 会退化成真的遍历文件,几百个包能跑几十秒。 */
+    private const val STORAGE_SCAN_BUDGET_MS = 6000L
+
+    private fun topStorage(args: JSONObject, ctx: Context?): String {
+        val count = args.optInt("count", 8).coerceIn(1, 30)
+        val includeSystem = args.optBoolean("include_system", false)
+        val pm = ctx?.packageManager
+
+        var scan = ctx?.let { queryStorageStats(it) } ?: StorageScan(emptyList(), false)
+        if (scan.apps.isEmpty()) {
+            // 退路:每日任务 DiskStatsLoggingService 落在 /data/system/diskstats_cache.json
+            // 里的快照,可能是昨天的,但总比没有强。
+            Log.i(TAG, "StorageStatsManager yielded nothing, falling back to dumpsys diskstats")
+            scan = StorageScan(parseDiskStats(sh("dumpsys diskstats", limit = 512 * 1024)), false)
+        }
+        if (scan.apps.isEmpty()) {
+            // 这条错误串是写给模型看的:必须明说"别重试",否则它会退回 run_shell
+            // 自己拼命令,又把六轮烧光 —— 那正是本工具要解决的问题。
+            return "error: 取不到各应用的存储占用（没有 PACKAGE_USAGE_STATS 权限，" +
+                    "dumpsys diskstats 也没有缓存数据）。请直接如实告知用户这项查不到，" +
+                    "不要改用 run_shell 或其它工具重试。"
+        }
+
+        val sb = StringBuilder()
+        // 总量/剩余单独取:拿不到就不打印,别让整个工具因此失败
+        storageTotals(ctx)?.let { sb.append(it).append('\n') }
+        sb.append("占用存储前 ").append(count).append(" 名")
+        if (!includeSystem) sb.append("（不含系统应用）")
+        sb.append(":\n")
+
+        var n = 0
+        for (a in scan.apps.sortedByDescending { it.app + it.data }) {
+            val info = pm?.let { runCatching { it.getApplicationInfo(a.pkg, 0) }.getOrNull() }
+            val isSystem = when {
+                pm == null -> false        // 没有 PackageManager 就没法判断，全给出去
+                info == null -> true       // 已卸载 / 属于别的用户，当系统项滤掉
+                else -> (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+            }
+            if (isSystem && !includeSystem) continue
+            val label = info?.let { pm.getApplicationLabel(it).toString() }
+            sb.append("  ").append(++n).append(". ")
+                .append(if (label != null && label != a.pkg) "$label (${a.pkg})" else a.pkg)
+                .append(" — ").append(humanBytes(a.app + a.data))
+                .append("（应用 ").append(humanBytes(a.app))
+                .append("，数据 ").append(humanBytes((a.data - a.cache).coerceAtLeast(0)))
+                .append("，缓存 ").append(humanBytes(a.cache)).append("）\n")
+            if (n >= count) break
+        }
+        if (n == 0) {
+            sb.append("  （统计到的 ").append(scan.apps.size)
+                .append(" 项全是系统应用；想看它们请用 include_system=true）")
+        }
+        if (scan.partial) {
+            sb.append("（本机未启用存储配额，只来得及统计 ").append(scan.apps.size)
+                .append(" 个应用，排名可能不完整）\n")
+        }
+        return sb.toString()
+    }
+
+    /**
+     * StorageStatsManager 路线。需要 PACKAGE_USAGE_STATS ——
+     * 没有的话**第一个包**就抛 SecurityException,整体放弃换下一条路;
+     * 单个包失败(正在卸载、属于别的用户)只跳过它自己。
+     */
+    private fun queryStorageStats(ctx: Context): StorageScan {
+        val ssm = ctx.getSystemService(Context.STORAGE_STATS_SERVICE)
+                as? android.app.usage.StorageStatsManager ?: return StorageScan(emptyList(), false)
+        val uuid = android.os.storage.StorageManager.UUID_DEFAULT
+        val user = android.os.Process.myUserHandle()
+        val out = ArrayList<AppSize>()
+        val deadline = System.currentTimeMillis() + STORAGE_SCAN_BUDGET_MS
+        for (app in ctx.packageManager.getInstalledApplications(0)) {
+            val st = try {
+                ssm.queryStatsForPackage(uuid, app.packageName, user)
+            } catch (e: SecurityException) {
+                Log.i(TAG, "no PACKAGE_USAGE_STATS in this process: $e")
+                return StorageScan(emptyList(), false)
+            } catch (t: Throwable) {
+                continue
+            }
+            out.add(AppSize(app.packageName, st.appBytes, st.dataBytes, st.cacheBytes))
+            if (System.currentTimeMillis() > deadline) {
+                Log.i(TAG, "storage scan budget exceeded after ${out.size} packages")
+                return StorageScan(out, true)
+            }
+        }
+        return StorageScan(out, false)
+    }
+
+    /**
+     * `dumpsys diskstats` 里的四行平行数组(单位是字节):
+     *   Package Names: ["com.foo","com.bar"]
+     *   App Sizes: [1234,5678]
+     *   App Data Sizes: [...]
+     *   App Cache Sizes: [...]
+     * 按下标对齐。缺哪条就当 0,不能因为少一条把整份数据丢了。
+     */
+    private fun parseDiskStats(raw: String): List<AppSize> {
+        fun arr(label: String): List<String>? =
+            Regex("^$label:\\s*\\[(.*)\\]\\s*$", RegexOption.MULTILINE)
+                .find(raw)?.groupValues?.get(1)
+                ?.split(',')
+                ?.map { it.trim().trim('"') }
+                ?.filter { it.isNotEmpty() }
+        val names = arr("Package Names") ?: return emptyList()
+        val app = arr("App Sizes").orEmpty()
+        val data = arr("App Data Sizes").orEmpty()
+        val cache = arr("App Cache Sizes").orEmpty()
+        return names.mapIndexed { i, pkg ->
+            AppSize(
+                pkg,
+                app.getOrNull(i)?.toLongOrNull() ?: 0L,
+                data.getOrNull(i)?.toLongOrNull() ?: 0L,
+                cache.getOrNull(i)?.toLongOrNull() ?: 0L
+            )
+        }
+    }
+
+    /** 机身存储总量/剩余。StorageStatsManager 的这两个方法不需要任何权限。 */
+    private fun storageTotals(ctx: Context?): String? {
+        if (ctx == null) return null
+        runCatching {
+            val ssm = ctx.getSystemService(Context.STORAGE_STATS_SERVICE)
+                    as android.app.usage.StorageStatsManager
+            val uuid = android.os.storage.StorageManager.UUID_DEFAULT
+            val total = ssm.getTotalBytes(uuid)
+            val free = ssm.getFreeBytes(uuid)
+            return "机身存储共 ${humanBytes(total)}，已用 ${humanBytes(total - free)}，" +
+                    "剩余 ${humanBytes(free)}"
+        }
+        return runCatching {
+            val fs = android.os.StatFs("/data")
+            "/data 共 ${humanBytes(fs.blockCountLong * fs.blockSizeLong)}，" +
+                    "剩余 ${humanBytes(fs.availableBlocksLong * fs.blockSizeLong)}"
+        }.getOrNull()
+    }
+
+    private fun humanBytes(b: Long): String = when {
+        b >= 1024L * 1024 * 1024 -> String.format(Locale.US, "%.2fGB", b / 1024.0 / 1024 / 1024)
+        b >= 1024L * 1024 -> String.format(Locale.US, "%.0fMB", b / 1024.0 / 1024)
+        else -> "${b / 1024}KB"
+    }
 
     // ---------------------------------------------------------------- 应用
 
