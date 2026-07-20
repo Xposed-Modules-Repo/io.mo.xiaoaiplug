@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">XiaoAi Plug</string>
+    <string name="module_description">超级小爱大模型探针/替换模块（开发中）</string>
+    <string name="ui_auto_description">代替你操作微信界面，用于「给某人发消息」这类小爱自己做不到的指令。</string>
+    <string-array name="xposed_scope">
+        <item>com.miui.voiceassist</item>
+        <!-- 勾上自己:HookEntry 会在本模块进程里改写 ModuleStatus.isActive()，
+             设置界面靠它判断 LSPosed 有没有真的激活模块。 -->
+        <item>com.xiaoai.plug</item>
+    </string-array>
+</resources>

@@ -1,0 +1,38 @@
+# Gradle
+.gradle/
+build/
+
+# Kotlin
+.kotlin/
+
+# Local configuration (machine-specific SDK paths)
+local.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Hook tracing data (development artifact)
+recent.json
+
+# Claude
+.claude/
+
+# NDK
+*.so
+obj/
+*.apk
+*.ap_
+*.dex
+
+# Signing
+*.jks
+*.keystore
+
+# OS generated
+.DS_Store
+ehthumbs.db
+Desktop.ini
+

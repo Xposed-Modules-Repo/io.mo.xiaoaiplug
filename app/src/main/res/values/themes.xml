@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        界面全部由 Compose 绘制，这个主题只负责窗口本身：
+        背景透明 + 不画系统栏底色，交给 enableEdgeToEdge() 和 Compose 处理。
+        用 DayNight 作父主题，是为了让系统在切深色时给出正确的窗口背景，
+        避免 Compose 首帧之前闪一下白底。
+    -->
+    <style name="Theme.XiaoAiPlug" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- 不要在这里写死 windowLightStatusBar：深色主题下会把状态栏图标锁成黑的，
+             在黑底上直接看不见。交给 enableEdgeToEdge() 按深浅色自动切。 -->
+    </style>
+</resources>
