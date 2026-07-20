@@ -1,4 +1,4 @@
-package com.xiaoai.plug.ui.config
+package io.mo.xiaoaiplug.ui.config
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -20,9 +20,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.xiaoai.plug.config.Tools
-import com.xiaoai.plug.ui.ConfigViewModel
-import com.xiaoai.plug.ui.nav.PageScaffold
+import io.mo.xiaoaiplug.config.Tools
+import io.mo.xiaoaiplug.ui.ConfigViewModel
+import io.mo.xiaoaiplug.ui.nav.PageScaffold
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.preference.ArrowPreference

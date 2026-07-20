@@ -1,4 +1,4 @@
-package com.xiaoai.plug.ui.home
+package io.mo.xiaoaiplug.ui.home
 
 import android.content.Intent
 import android.provider.Settings
@@ -23,9 +23,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.xiaoai.plug.ui.ConfigViewModel
-import com.xiaoai.plug.ui.nav.CardContentPadding
-import com.xiaoai.plug.ui.nav.PageScaffold
+import io.mo.xiaoaiplug.ui.ConfigViewModel
+import io.mo.xiaoaiplug.ui.nav.CardContentPadding
+import io.mo.xiaoaiplug.ui.nav.PageScaffold
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text

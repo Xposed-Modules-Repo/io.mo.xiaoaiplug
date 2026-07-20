@@ -1,4 +1,4 @@
-package com.xiaoai.plug.auto
+package io.mo.xiaoaiplug.auto
 
 import android.accessibilityservice.AccessibilityService
 import android.content.ClipData

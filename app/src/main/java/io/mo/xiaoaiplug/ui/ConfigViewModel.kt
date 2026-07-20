@@ -1,18 +1,18 @@
-package com.xiaoai.plug.ui
+package io.mo.xiaoaiplug.ui
 
 import android.app.Application
 import android.content.ComponentName
 import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.xiaoai.plug.ModuleStatus
-import com.xiaoai.plug.auto.UiAutoService
-import com.xiaoai.plug.config.AiClient
-import com.xiaoai.plug.config.AiConfig
-import com.xiaoai.plug.config.ConfigRepository
-import com.xiaoai.plug.config.LogEntry
-import com.xiaoai.plug.config.LogStore
-import com.xiaoai.plug.config.Tools
+import io.mo.xiaoaiplug.ModuleStatus
+import io.mo.xiaoaiplug.auto.UiAutoService
+import io.mo.xiaoaiplug.config.AiClient
+import io.mo.xiaoaiplug.config.AiConfig
+import io.mo.xiaoaiplug.config.ConfigRepository
+import io.mo.xiaoaiplug.config.LogEntry
+import io.mo.xiaoaiplug.config.LogStore
+import io.mo.xiaoaiplug.config.Tools
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

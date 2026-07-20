@@ -1,4 +1,4 @@
-package com.xiaoai.plug.ui.nav
+package io.mo.xiaoaiplug.ui.nav
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.spring
@@ -17,10 +17,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import com.xiaoai.plug.ui.config.ConfigTab
-import com.xiaoai.plug.ui.home.HomeScreen
-import com.xiaoai.plug.ui.logs.LogsScreen
-import com.xiaoai.plug.ui.settings.SettingsScreen
+import io.mo.xiaoaiplug.ui.config.ConfigTab
+import io.mo.xiaoaiplug.ui.home.HomeScreen
+import io.mo.xiaoaiplug.ui.logs.LogsScreen
+import io.mo.xiaoaiplug.ui.settings.SettingsScreen
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.blur.layerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop

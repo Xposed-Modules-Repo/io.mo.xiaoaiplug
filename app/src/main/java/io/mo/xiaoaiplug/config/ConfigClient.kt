@@ -1,4 +1,4 @@
-package com.xiaoai.plug.config
+package io.mo.xiaoaiplug.config
 
 import android.content.Context
 import android.net.Uri

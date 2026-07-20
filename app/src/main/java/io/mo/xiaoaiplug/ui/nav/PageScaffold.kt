@@ -1,4 +1,4 @@
-package com.xiaoai.plug.ui.nav
+package io.mo.xiaoaiplug.ui.nav
 
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope

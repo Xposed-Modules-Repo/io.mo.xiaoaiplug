@@ -1,4 +1,4 @@
-package com.xiaoai.plug.ui.theme
+package io.mo.xiaoaiplug.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable

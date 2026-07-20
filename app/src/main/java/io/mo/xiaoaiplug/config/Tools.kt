@@ -1,4 +1,4 @@
-package com.xiaoai.plug.config
+package io.mo.xiaoaiplug.config
 
 import android.content.Context
 import android.util.Log
@@ -762,7 +762,7 @@ object Tools {
                         putString("send", send.toString())
                     }
                     val out = ctx.contentResolver.call(
-                        android.net.Uri.parse("content://com.xiaoai.plug.config"),
+                        android.net.Uri.parse("content://io.mo.xiaoaiplug.config"),
                         "send_message", null, extras
                     )
                     out?.getString("result") ?: "error: 模块进程无响应（无障碍服务可能没开）"

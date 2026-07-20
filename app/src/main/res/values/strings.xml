@@ -6,6 +6,6 @@
         <item>com.miui.voiceassist</item>
         <!-- 勾上自己:HookEntry 会在本模块进程里改写 ModuleStatus.isActive()，
              设置界面靠它判断 LSPosed 有没有真的激活模块。 -->
-        <item>com.xiaoai.plug</item>
+        <item>io.mo.xiaoaiplug</item>
     </string-array>
 </resources>

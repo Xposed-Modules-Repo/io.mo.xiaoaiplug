@@ -1,9 +1,9 @@
-package com.xiaoai.plug.ui.config
+package io.mo.xiaoaiplug.ui.config
 
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.unit.Dp
-import com.xiaoai.plug.ui.nav.PageScaffold
+import io.mo.xiaoaiplug.ui.nav.PageScaffold
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.icon.MiuixIcons

@@ -1,10 +1,10 @@
-package com.xiaoai.plug.ui
+package io.mo.xiaoaiplug.ui
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.xiaoai.plug.config.LogEntry
-import com.xiaoai.plug.config.LogStore
+import io.mo.xiaoaiplug.config.LogEntry
+import io.mo.xiaoaiplug.config.LogStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

@@ -1,4 +1,4 @@
-package com.xiaoai.plug.ui.theme
+package io.mo.xiaoaiplug.ui.theme
 
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow

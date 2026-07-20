@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  自适应图标背景层：接近白色、略带冷调的竖向渐变，取自原图那块圆角底板
+  （实测采样 #FDFDFD → #F0F3FA）。图案本身色彩很重，背景保持干净不抢戏。
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -10,11 +14,11 @@
             <gradient
                 android:startX="0"
                 android:startY="0"
-                android:endX="108"
+                android:endX="0"
                 android:endY="108"
                 android:type="linear">
-                <item android:offset="0" android:color="#FFFF8A3D" />
-                <item android:offset="1" android:color="#FFF04E00" />
+                <item android:offset="0" android:color="#FFFFFFFF" />
+                <item android:offset="1" android:color="#FFEFF2F9" />
             </gradient>
         </aapt:attr>
     </path>

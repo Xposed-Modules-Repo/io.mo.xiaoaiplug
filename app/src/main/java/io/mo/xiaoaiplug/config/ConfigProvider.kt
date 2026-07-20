@@ -1,4 +1,4 @@
-package com.xiaoai.plug.config
+package io.mo.xiaoaiplug.config
 
 import android.content.ContentProvider
 import android.content.ContentValues
@@ -7,7 +7,7 @@ import android.content.SharedPreferences
 import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
-import com.xiaoai.plug.auto.UiAutoService
+import io.mo.xiaoaiplug.auto.UiAutoService
 
 object ConfigKeys {
     // 服务商:openai / anthropic / xai / siliconflow(见 AiProvider)
@@ -50,13 +50,13 @@ object ConfigKeys {
 class ConfigProvider : ContentProvider() {
 
     companion object {
-        const val AUTHORITY = "com.xiaoai.plug.config"
+        const val AUTHORITY = "io.mo.xiaoaiplug.config"
         const val METHOD_GET = "get"
         const val METHOD_SET = "set"
 
         // 界面自动化:Hook 在小爱进程,无障碍服务在本模块进程,靠这两个方法过桥。
         // 侦察用,adb 也能直接调:
-        //   adb shell content call --uri content://com.xiaoai.plug.config --method ui_dump
+        //   adb shell content call --uri content://io.mo.xiaoaiplug.config --method ui_dump
         const val METHOD_UI_DUMP = "ui_dump"
         const val METHOD_SEND_MESSAGE = "send_message"
 
@@ -78,11 +78,11 @@ class ConfigProvider : ContentProvider() {
          *
          * 这个 provider 必须 exported —— hook 跑在超级小爱进程里,不导出就过不了桥。
          * 但它存着 **API Key**,现在还存着对话记录,不设防的话设备上任意一个 App 一条
-         *   adb shell content call --uri content://com.xiaoai.plug.config --method get
+         *   adb shell content call --uri content://io.mo.xiaoaiplug.config --method get
          * 就能全读走。callingPackage 由 Binder 在系统侧填,调用方伪造不了,拿来做白名单足够。
          */
         private val ALLOWED_CALLERS = setOf(
-            "com.xiaoai.plug",
+            "io.mo.xiaoaiplug",
             "com.miui.voiceassist"
         )
 

@@ -6,12 +6,12 @@ plugins {
 }
 
 android {
-    namespace = "com.xiaoai.plug"
+    namespace = "io.mo.xiaoaiplug"
     // miuix 0.9.x 的 AAR 元数据要求 minCompileSdk=37，低于它 checkDebugAarMetadata 直接失败。
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.xiaoai.plug"
+        applicationId = "io.mo.xiaoaiplug"
         // miuix-blur 要求 minSdk 33（模糊靠 RenderEffect，低版本拿不到「液态玻璃」质感）。
         minSdk = 33
         targetSdk = 36

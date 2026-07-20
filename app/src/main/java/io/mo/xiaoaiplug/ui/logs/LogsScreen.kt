@@ -1,4 +1,4 @@
-package com.xiaoai.plug.ui.logs
+package io.mo.xiaoaiplug.ui.logs
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
@@ -33,10 +33,10 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.xiaoai.plug.config.LogEntry
-import com.xiaoai.plug.ui.LogsViewModel
-import com.xiaoai.plug.ui.nav.CardContentPadding
-import com.xiaoai.plug.ui.nav.PageScaffold
+import io.mo.xiaoaiplug.config.LogEntry
+import io.mo.xiaoaiplug.ui.LogsViewModel
+import io.mo.xiaoaiplug.ui.nav.CardContentPadding
+import io.mo.xiaoaiplug.ui.nav.PageScaffold
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton

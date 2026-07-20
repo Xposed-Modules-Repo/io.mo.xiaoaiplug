@@ -37,7 +37,7 @@
 
         <provider
             android:name=".config.ConfigProvider"
-            android:authorities="com.xiaoai.plug.config"
+            android:authorities="io.mo.xiaoaiplug.config"
             android:exported="true" />
 
         <service

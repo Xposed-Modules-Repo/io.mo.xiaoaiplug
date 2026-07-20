@@ -1,12 +1,12 @@
-package com.xiaoai.plug
+package io.mo.xiaoaiplug
 
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.xiaoai.plug.config.AiClient
-import com.xiaoai.plug.config.AiConfig
-import com.xiaoai.plug.config.ConfigClient
+import io.mo.xiaoaiplug.config.AiClient
+import io.mo.xiaoaiplug.config.AiConfig
+import io.mo.xiaoaiplug.config.ConfigClient
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -19,7 +19,7 @@ private const val TAG = "XiaoAiProbe"
 private const val TARGET_PKG = "com.miui.voiceassist"
 
 /** 本模块自己的包名。作用域里勾上自己,就能靠 hook 自身来检测「模块是否已激活」。 */
-private const val SELF_PKG = "com.xiaoai.plug"
+private const val SELF_PKG = "io.mo.xiaoaiplug"
 
 private const val OPERATION_MANAGER_CLASS = "com.xiaomi.voiceassistant.instruction.base.OperationManager"
 private const val RN_CARD_CLASS = "com.xiaomi.voiceassistant.instruction.card.TemplateReactNativeCard"
@@ -138,7 +138,7 @@ class HookEntry : IXposedHookLoadPackage {
     /** 把本模块进程里的 ModuleStatus.isActive() 替换成返回 true(见 ModuleStatus 的注释)。 */
     private fun hookSelfProbe(cl: ClassLoader) {
         try {
-            val clazz = cl.loadClass("com.xiaoai.plug.ModuleStatus")
+            val clazz = cl.loadClass("io.mo.xiaoaiplug.ModuleStatus")
             XposedBridge.hookAllMethods(
                 clazz, "isActive",
                 object : XC_MethodHook() {

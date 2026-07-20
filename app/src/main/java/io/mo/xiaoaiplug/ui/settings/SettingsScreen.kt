@@ -1,4 +1,4 @@
-package com.xiaoai.plug.ui.settings
+package io.mo.xiaoaiplug.ui.settings
 
 import android.content.Intent
 import androidx.compose.foundation.layout.Box
@@ -19,11 +19,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.xiaoai.plug.ui.nav.CardContentPadding
-import com.xiaoai.plug.ui.nav.PageScaffold
-import com.xiaoai.plug.ui.theme.AccentColor
-import com.xiaoai.plug.ui.theme.DarkMode
-import com.xiaoai.plug.ui.theme.UiPrefs
+import io.mo.xiaoaiplug.ui.nav.CardContentPadding
+import io.mo.xiaoaiplug.ui.nav.PageScaffold
+import io.mo.xiaoaiplug.ui.theme.AccentColor
+import io.mo.xiaoaiplug.ui.theme.DarkMode
+import io.mo.xiaoaiplug.ui.theme.UiPrefs
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable

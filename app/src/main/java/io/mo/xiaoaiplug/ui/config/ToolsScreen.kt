@@ -1,4 +1,4 @@
-package com.xiaoai.plug.ui.config
+package io.mo.xiaoaiplug.ui.config
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
@@ -13,8 +13,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.xiaoai.plug.config.Tools
-import com.xiaoai.plug.ui.ConfigViewModel
+import io.mo.xiaoaiplug.config.Tools
+import io.mo.xiaoaiplug.ui.ConfigViewModel
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text

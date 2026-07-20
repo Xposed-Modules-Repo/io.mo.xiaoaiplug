@@ -1,4 +1,4 @@
-package com.xiaoai.plug
+package io.mo.xiaoaiplug
 
 /**
  * LSPosed 是否真的把本模块激活了。
@@ -7,7 +7,7 @@ package com.xiaoai.plug
  * 会把它替换成返回 true。所以界面读到 true 就说明 hook 框架确实生效了 ——
  * 光看配置文件或者进程存活都证明不了这一点。
  *
- * 前提是模块作用域里勾了自己(res/values/strings.xml 的 xposed_scope 已加上 com.xiaoai.plug),
+ * 前提是模块作用域里勾了自己(res/values/strings.xml 的 xposed_scope 已加上 io.mo.xiaoaiplug),
  * 用户在 LSPosed 里没勾自己的话这里会一直是 false,属于误报,界面的提示要写清楚。
  */
 object ModuleStatus {

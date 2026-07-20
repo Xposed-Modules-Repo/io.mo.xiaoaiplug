@@ -1,4 +1,4 @@
-package com.xiaoai.plug.config
+package io.mo.xiaoaiplug.config
 
 import android.content.ContentValues
 import android.content.Context

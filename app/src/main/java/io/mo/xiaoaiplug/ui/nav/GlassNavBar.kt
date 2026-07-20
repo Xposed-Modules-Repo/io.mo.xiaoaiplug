@@ -3,7 +3,7 @@
 // 该示例本身又源自 Kyant0/AndroidLiquidGlass (Apache-2.0)。
 // InstallerX Revived 的 FloatingBottomBar 走的是同一条血脉，只是它整份文件是 GPL-3.0，
 // 所以这里直接从上游 Apache-2.0 的版本改，避免把本项目拖进 GPL。
-package com.xiaoai.plug.ui.nav
+package io.mo.xiaoaiplug.ui.nav
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseOut
@@ -67,14 +67,14 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
-import com.xiaoai.plug.ui.liquid.InnerShadow
-import com.xiaoai.plug.ui.liquid.animation.DampedDragAnimation
-import com.xiaoai.plug.ui.liquid.animation.InteractiveHighlight
-import com.xiaoai.plug.ui.liquid.innerShadow
-import com.xiaoai.plug.ui.liquid.lens
-import com.xiaoai.plug.ui.liquid.rememberCombinedBackdrop
-import com.xiaoai.plug.ui.liquid.vibrancy
-import com.xiaoai.plug.ui.theme.LocalIsDark
+import io.mo.xiaoaiplug.ui.liquid.InnerShadow
+import io.mo.xiaoaiplug.ui.liquid.animation.DampedDragAnimation
+import io.mo.xiaoaiplug.ui.liquid.animation.InteractiveHighlight
+import io.mo.xiaoaiplug.ui.liquid.innerShadow
+import io.mo.xiaoaiplug.ui.liquid.lens
+import io.mo.xiaoaiplug.ui.liquid.rememberCombinedBackdrop
+import io.mo.xiaoaiplug.ui.liquid.vibrancy
+import io.mo.xiaoaiplug.ui.theme.LocalIsDark
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch

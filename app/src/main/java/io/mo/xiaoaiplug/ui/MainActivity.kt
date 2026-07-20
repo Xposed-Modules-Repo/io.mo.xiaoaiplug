@@ -1,12 +1,12 @@
-package com.xiaoai.plug.ui
+package io.mo.xiaoaiplug.ui
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import com.xiaoai.plug.ui.nav.AppRoot
-import com.xiaoai.plug.ui.theme.AppTheme
+import io.mo.xiaoaiplug.ui.nav.AppRoot
+import io.mo.xiaoaiplug.ui.theme.AppTheme
 
 class MainActivity : ComponentActivity() {
 

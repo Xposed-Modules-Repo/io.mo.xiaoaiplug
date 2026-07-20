@@ -1,4 +1,4 @@
-package com.xiaoai.plug.config
+package io.mo.xiaoaiplug.config
 
 /**
  * 支持接入的 AI 服务商。
