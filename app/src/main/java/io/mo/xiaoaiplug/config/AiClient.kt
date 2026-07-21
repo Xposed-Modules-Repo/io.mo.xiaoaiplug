@@ -6,6 +6,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
@@ -78,9 +79,15 @@ object AiClient {
         // 包一层只为埋点:chatInternal 有三个 return 点,逐个改容易漏。
         // 失败原样往上抛,不改变调用方(HookEntry)看到的行为。
         val started = System.currentTimeMillis()
+        // 各阶段耗时。用户看到"这轮花了 7 秒"时,得能一眼分清是模型慢还是工具慢 ——
+        // 早先只有一个总时长,只能拿 CHAT 和 TOOL 两条记录的时间戳倒推。
+        val steps = ArrayList<Pair<String, Long>>()
         return try {
-            val answer = chatInternal(config, userText, ctx, history, allowMutating)
-            LogClient.chat(ctx, userText, answer, config.effectiveModel, System.currentTimeMillis() - started)
+            val answer = chatInternal(config, userText, ctx, history, allowMutating, steps)
+            LogClient.chat(
+                ctx, userText, answer, config.effectiveModel,
+                System.currentTimeMillis() - started, formatSteps(steps)
+            )
             answer
         } catch (t: Throwable) {
             LogClient.error(
@@ -93,12 +100,19 @@ object AiClient {
         }
     }
 
+    /** "模型 2.9s → 工具 0.8s → 模型 3.4s"。 */
+    private fun formatSteps(steps: List<Pair<String, Long>>): String =
+        steps.joinToString(" → ") { (name, ms) ->
+            name + " " + String.format(Locale.US, "%.1f", ms / 1000.0) + "s"
+        }
+
     private fun chatInternal(
         config: AiConfig,
         userText: String,
         ctx: Context?,
         history: List<ChatTurn>,
-        allowMutating: () -> Boolean
+        allowMutating: () -> Boolean,
+        steps: MutableList<Pair<String, Long>>
     ): String {
         val specs = Tools.enabled(config.enabledTools)
         val useNative = config.useNativeTools && nativeToolsSupported && specs.isNotEmpty()
@@ -137,7 +151,9 @@ object AiClient {
 
         var lastContent = ""
         for (iter in 0 until MAX_TOOL_ITERATIONS) {
+            val modelAt = System.currentTimeMillis()
             val reply = callModel(config, messages, if (useNative) specs else emptyList(), ctx)
+            steps.add("模型" to System.currentTimeMillis() - modelAt)
             val content = reply.optString("content", "")
             lastContent = content
 
@@ -157,7 +173,12 @@ object AiClient {
             // 原样回填 assistant 这一轮(原生模式要带上 tool_calls,否则模型对不上号)
             messages.put(reply)
 
+            val toolAt = System.currentTimeMillis()
             val results = runCallsParallel(calls, ctx, iter, allowMutating)
+            steps.add(
+                (if (calls.size == 1) "工具" else "工具×${calls.size}")
+                        to System.currentTimeMillis() - toolAt
+            )
 
             if (calls.any { it.id != null }) {
                 // 原生协议:每个调用一条 role=tool 消息
@@ -437,8 +458,21 @@ object AiClient {
         return out
     }
 
+    /**
+     * 一次 POST。
+     *
+     * **不要在正常路径上 disconnect()** —— 它会关掉底层 socket 并把它踢出 keep-alive 池,
+     * 而一轮对话至少两次请求(决定调工具 + 组织答案),打向同一个 host。
+     * 实测这个端点新建连接要 133ms 握手(TTFB 186ms),复用连接 TTFB 只要 56ms。
+     * 把响应体**读完**(下面两个 `use` 都读到 EOF,包括 4xx 的 errorStream)就够了,
+     * HttpURLConnection 自己会把连接还回池子。
+     *
+     * 出异常时才 disconnect:那种连接状态不明(可能还剩没读完的字节),
+     * 留在池子里会毒害下一次请求。
+     */
     private fun postJson(url: URL, headers: Map<String, String>, body: JSONObject): JSONObject {
         val conn = url.openConnection() as HttpURLConnection
+        var bodyDrained = false
         try {
             conn.requestMethod = "POST"
             conn.setRequestProperty("Content-Type", "application/json")
@@ -452,10 +486,12 @@ object AiClient {
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            // HttpError 也是读完整个 body 之后才抛的,连接同样是干净的、可复用
+            bodyDrained = true
             if (code !in 200..299) throw HttpError(code, text)
             return JSONObject(text)
         } finally {
-            conn.disconnect()
+            if (!bodyDrained) conn.disconnect()
         }
     }
 

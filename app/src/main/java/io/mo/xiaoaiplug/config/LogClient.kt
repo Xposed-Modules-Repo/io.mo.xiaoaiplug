@@ -26,7 +26,15 @@ object LogClient {
         }
     }
 
-    fun chat(context: Context?, question: String, answer: String, model: String, durationMs: Long) {
+    fun chat(
+        context: Context?,
+        question: String,
+        answer: String,
+        model: String,
+        durationMs: Long,
+        /** 各阶段耗时,形如 "模型 2.9s → 工具 0.8s → 模型 3.4s"。 */
+        breakdown: String = ""
+    ) {
         append(
             context,
             LogEntry(
@@ -34,7 +42,9 @@ object LogClient {
                 type = LogEntry.TYPE_CHAT,
                 title = question,
                 detail = buildString {
-                    append("模型: ").append(model.ifBlank { "(未填)" }).append("\n\n")
+                    append("模型: ").append(model.ifBlank { "(未填)" }).append("\n")
+                    if (breakdown.isNotBlank()) append("耗时: ").append(breakdown).append("\n")
+                    append("\n")
                     append("问: ").append(question).append("\n\n")
                     append("答: ").append(answer)
                 },
