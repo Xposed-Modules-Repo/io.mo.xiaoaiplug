@@ -33,14 +33,20 @@ jobs:
       - name: Checkout source repo
         uses: actions/checkout@v4
         with:
+          ref: master
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Push master and tags to target repo
+      - name: Push master to target repo
         env:
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
           git push "https://x-access-token:${SYNC_TOKEN}@github.com/Xposed-Modules-Repo/io.mo.xiaoaiplug.git" master --force
+
+      - name: Push tags to target repo
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
           git push "https://x-access-token:${SYNC_TOKEN}@github.com/Xposed-Modules-Repo/io.mo.xiaoaiplug.git" --tags --force
 
       - name: Sync release to target repo
