@@ -49,7 +49,13 @@ object Tools {
      */
     data class Spec(
         val name: String,
+        /** 一句话说明。工具页拿它当开关的 summary,所以要短、是人话。 */
         val description: String,
+        /**
+         * 只给模型看的补充:适用场景、默认值、坑。不进界面 ——
+         * 揉进 [description] 的话工具页那 16 个开关会被撑成一堵墙。
+         */
+        val modelHint: String = "",
         val params: List<Param> = emptyList(),
         val mutating: Boolean = false,
         val handler: (JSONObject, Context?) -> String
@@ -80,6 +86,19 @@ object Tools {
         return ALL.filter { it.name in want }
     }
 
+    /**
+     * 给模型看的工具说明。三条出口(OpenAI schema / Anthropic schema / 文本约定)都用它,
+     * 免得"动作类"这种信息只在其中一条路上有。
+     *
+     * [Spec.mutating] 原先只在执行时被 allowMutating 拦,模型那边一无所知 ——
+     * 它会以为自己随时能开应用,答"好的已经帮你打开了",实际被拦下什么也没发生。
+     */
+    private fun modelDescription(s: Spec): String = buildString {
+        append(s.description)
+        if (s.modelHint.isNotEmpty()) append(' ').append(s.modelHint)
+        if (s.mutating) append(" ⚡动作类：会改变设备状态，只在本轮确实由本模块接管时才会真正执行。")
+    }
+
     /** 单个工具的 JSON Schema。OpenAI 叫 `parameters`,Anthropic 叫 `input_schema`,内容一样。 */
     private fun paramsSchema(s: Spec): JSONObject {
         val props = JSONObject()
@@ -105,7 +124,7 @@ object Tools {
                     "function",
                     JSONObject()
                         .put("name", s.name)
-                        .put("description", s.description)
+                        .put("description", modelDescription(s))
                         .put("parameters", paramsSchema(s))
                 )
             )
@@ -120,7 +139,7 @@ object Tools {
             arr.put(
                 JSONObject()
                     .put("name", s.name)
-                    .put("description", s.description)
+                    .put("description", modelDescription(s))
                     .put("input_schema", paramsSchema(s))
             )
         }
@@ -141,7 +160,7 @@ object Tools {
         sb.append("拿到 <tool_response> 后，用简洁口语回答用户，不要复述原始数据。\n\n")
         sb.append("可用工具：\n")
         for (s in specs) {
-            sb.append("- ").append(s.name).append(": ").append(s.description)
+            sb.append("- ").append(s.name).append(": ").append(modelDescription(s))
             if (s.params.isNotEmpty()) {
                 sb.append(" 参数: ")
                 sb.append(s.params.joinToString(", ") {
@@ -180,6 +199,8 @@ object Tools {
     private val runShell = Spec(
         name = "run_shell",
         description = "以 root 执行任意 shell 命令。",
+        modelHint = "用于没有专用工具覆盖的操作（安装/卸载应用、查看进程详情、改文件权限等）。" +
+                "能用专用工具就用专用工具——那些已经把输出解析好了，run_shell 的原始输出往往很长且要多轮往返。",
         params = listOf(Param("command", "string", "要执行的 shell 命令", required = true)),
         handler = { args, _ ->
             val cmd = args.optString("command", args.optString("cmd", "")).trim()
@@ -192,6 +213,7 @@ object Tools {
     private val deviceStatus = Spec(
         name = "device_status",
         description = "一次性返回设备状态：电量与充电状态、剩余存储、内存、运行时长、机型、系统版本。",
+        modelHint = "用户问「还有多少电」「内存够不够」「手机是什么型号」时用。",
         handler = { _, _ ->
             // 一次 su 调用跑完所有采集。分五次起进程要多花近半秒。
             val raw = sh(
@@ -214,6 +236,9 @@ object Tools {
     private val wifiInfo = Spec(
         name = "wifi_info",
         description = "返回当前连接的 WiFi状态信息",
+        modelHint = "包含信号强度、协商速率、IP 地址，以及已保存网络的密码。" +
+                "能查询任意已保存 WiFi 的密码（root 读 WifiConfigStore.xml），返回里会直接给出【答案】，可据此直接作答、无需再自己找。" +
+                "用户问「WiFi 密码是多少」「当前连的什么网」「信号怎么样」时用。",
         params = listOf(
             Param("ssid", "string", "只查这个 SSID 的密码；留空表示当前连接的网络")
         ),
@@ -325,6 +350,8 @@ object Tools {
     private val networkInfo = Spec(
         name = "network_info",
         description = "当前网络连接情况",
+        modelHint = "包含连接类型（WiFi/移动数据）、IP 地址、运营商、网络制式、飞行模式状态、连通性测试。" +
+                "用户问「现在用的什么网络」「有没有联网」「运营商是谁」时用。",
         handler = { _, _ ->
             sh(
                 "echo '--TYPE--'; dumpsys connectivity | grep -m3 -E 'NetworkAgentInfo|Active default';" +
@@ -350,6 +377,8 @@ object Tools {
     private val topMemoryApps = Spec(
         name = "top_memory_apps",
         description = "获取进程内存占用状态",
+        modelHint = "用户问「哪些应用最占内存」「内存被谁吃了」「手机卡是不是内存不够」时用。" +
+                "默认不含系统进程（system_server/systemui 等），用户要看的话传 include_system=true。",
         params = listOf(
             Param("count", "integer", "返回前几名，默认 8"),
             Param("include_system", "boolean", "是否包含系统进程(system_server/systemui 等)，默认 false")
@@ -510,6 +539,9 @@ object Tools {
     private val topStorageApps = Spec(
         name = "top_storage_apps",
         description = "获取各应用占用的存储空间",
+        modelHint = "统计应用大小 + 数据 + 缓存。" +
+                "用户问「哪些应用最占存储」「存储空间被谁用了」「手机空间不够了」时用。" +
+                "返回会附带机身存储总量和剩余。默认不含系统应用。",
         params = listOf(
             Param("count", "integer", "返回前几名，默认 8"),
             Param("include_system", "boolean", "是否包含系统应用，默认 false")
@@ -671,6 +703,7 @@ object Tools {
     private val listApps = Spec(
         name = "list_apps",
         description = "获取已安装的应用信息(包名 + 显示名)",
+        modelHint = "用户问「我装了哪些应用」「有没有装 XXX」「找一下 XX 的包名」时用。默认只列第三方应用。",
         params = listOf(
             Param("filter", "string", "按名称/包名过滤的关键词，留空返回全部第三方应用"),
             Param("include_system", "boolean", "是否包含系统应用，默认 false")
@@ -698,6 +731,7 @@ object Tools {
     private val launchApp = Spec(
         name = "launch_app",
         description = "启动应用",
+        modelHint = "支持按显示名或包名模糊匹配。用户说「打开微信」「帮我启动抖音」时用。",
         params = listOf(Param("name", "string", "应用显示名或包名", required = true)),
         mutating = true,
         handler = { args, ctx ->
@@ -735,6 +769,8 @@ object Tools {
     private val sendMessage = Spec(
         name = "send_message",
         description = "微信指定给某个联系人发消息。联系人名必须和微信里显示的备注/昵称**完全一致**",
+        modelHint = "通过无障碍服务发送，解决小爱原生不支持微信双开的问题。" +
+                "名字对不上就找不到人。整个流程需要数秒。用户说「给张三发微信说晚上不回家吃饭」时用。",
         params = listOf(
             Param("contact", "string", "联系人在微信里的显示名，必须完全一致", required = true),
             Param("text", "string", "要发送的消息正文", required = true),
@@ -778,6 +814,7 @@ object Tools {
     private val readFile = Spec(
         name = "read_file",
         description = "读取文本文件内容(root)。用于查看日志、配置等。",
+        modelHint = "支持 /data、/sdcard、/system 等任意路径。仅适合文本文件，二进制文件读了没有意义。",
         params = listOf(
             Param("path", "string", "绝对路径", required = true),
             Param("max_lines", "integer", "最多读多少行，默认 200")
@@ -795,6 +832,8 @@ object Tools {
     private val getSetting = Spec(
         name = "get_setting",
         description = "读取系统设置项的值(Settings.System/Secure/Global)。",
+        modelHint = "用户问「屏幕亮度多少」「自动锁屏时间是多少」时用。" +
+                "常用 key: screen_brightness(system)、screen_off_timeout(system)。",
         params = listOf(
             Param("namespace", "string", "system / secure / global", required = true,
                 enum = listOf("system", "secure", "global")),
@@ -810,8 +849,9 @@ object Tools {
 
     private val setSetting = Spec(
         name = "set_setting",
-        description = "修改系统设置项" +
-                "screen_off_timeout(毫秒, system)、airplane_mode_on(0/1, global)。",
+        description = "修改系统设置项",
+        modelHint = "用户说「把自动锁屏改成 1 分钟」「打开飞行模式」时用。" +
+                "常用 key: screen_off_timeout(毫秒, system)、airplane_mode_on(0/1, global)。",
         params = listOf(
             Param("namespace", "string", "system / secure / global", required = true,
                 enum = listOf("system", "secure", "global")),
@@ -834,6 +874,7 @@ object Tools {
     private val mediaControl = Spec(
         name = "media_control",
         description = "控制正在播放的媒体",
+        modelHint = "用户说「暂停音乐」「下一首」「停止播放」时用。",
         params = listOf(
             Param("action", "string", "动作", required = true,
                 enum = listOf("play", "pause", "toggle", "next", "previous", "stop"))
@@ -856,6 +897,8 @@ object Tools {
     private val setVolume = Spec(
         name = "set_volume",
         description = "设置、查询媒体音量",
+        modelHint = "用户问「现在音量多大」「把音量调到 50%」「静音」时用。" +
+                "不传 percent 则只返回当前音量、不做修改。",
         params = listOf(
             Param("percent", "integer", "目标音量百分比 0-100；不传则只返回当前音量")
         ),
@@ -881,6 +924,7 @@ object Tools {
     private val currentTime = Spec(
         name = "current_time",
         description = "获取当前系统时间",
+        modelHint = "精确到秒，含星期几。用户问「现在几点了」「今天星期几」「今天几号」时用。",
         handler = { _, _ ->
             val fmt = SimpleDateFormat("yyyy年M月d日 EEEE HH:mm:ss", Locale.CHINA)
             fmt.format(Date())
@@ -890,6 +934,7 @@ object Tools {
     private val recentNotifications = Spec(
         name = "recent_notifications",
         description = "获取最近的通知",
+        modelHint = "含包名、标题、正文。用户问「刚才来了什么通知」「有没有新消息」时用。",
         handler = { _, _ ->
             sh("dumpsys notification --noredact | grep -E 'pkg=|android.title=|android.text=' | head -n 60")
         }

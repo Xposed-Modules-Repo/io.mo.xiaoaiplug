@@ -40,6 +40,13 @@ data class AiConfig(
     val effectiveModel: String get() = model.ifBlank { aiProvider.defaultModel }
 
     /**
+     * 实际发给模型的系统提示词:用户留空就用内置的 [DEFAULT_SYSTEM_PROMPT]。
+     *
+     * 同样别直接读 [systemPrompt] —— 留空是"用默认",不是"不要系统提示词"。
+     */
+    val effectiveSystemPrompt: String get() = systemPrompt.ifBlank { DEFAULT_SYSTEM_PROMPT }
+
+    /**
      * 配置是否齐全到能真发一次请求。
      *
      * 地址和模型都有默认值兜底了,所以唯一还可能缺的就是密钥 ——

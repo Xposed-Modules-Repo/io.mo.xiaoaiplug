@@ -106,7 +106,7 @@ object AiClient {
 
         val messages = JSONArray()
         val sysParts = ArrayList<String>()
-        if (config.systemPrompt.isNotBlank()) sysParts.add(config.systemPrompt)
+        sysParts.add(config.effectiveSystemPrompt)
         // 文本约定模式下必须把工具表告诉模型;原生模式下 tools 参数已经带了,再塞一遍是浪费 token。
         if (!useNative && specs.isNotEmpty()) sysParts.add(Tools.toPromptSpec(specs))
         if (sysParts.isNotEmpty()) {

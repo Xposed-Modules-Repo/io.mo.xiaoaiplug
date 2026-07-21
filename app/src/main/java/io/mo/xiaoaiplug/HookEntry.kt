@@ -7,6 +7,7 @@ import android.util.Log
 import io.mo.xiaoaiplug.config.AiClient
 import io.mo.xiaoaiplug.config.AiConfig
 import io.mo.xiaoaiplug.config.ConfigClient
+import io.mo.xiaoaiplug.hook.SettingsHook
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -20,6 +21,9 @@ private const val TARGET_PKG = "com.miui.voiceassist"
 
 /** 本模块自己的包名。作用域里勾上自己,就能靠 hook 自身来检测「模块是否已激活」。 */
 private const val SELF_PKG = "io.mo.xiaoaiplug"
+
+/** 系统设置。只为了在「小米澎湃 AI」页里挂一个入口,跟语音那条链路无关。 */
+private const val SETTINGS_PKG = "com.android.settings"
 
 private const val OPERATION_MANAGER_CLASS = "com.xiaomi.voiceassistant.instruction.base.OperationManager"
 private const val RN_CARD_CLASS = "com.xiaomi.voiceassistant.instruction.card.TemplateReactNativeCard"
@@ -268,6 +272,11 @@ class HookEntry : IXposedHookLoadPackage {
         // 好让设置界面能判断 LSPosed 到底有没有真的激活本模块。
         if (lpparam.packageName == SELF_PKG) {
             hookSelfProbe(lpparam.classLoader)
+            return
+        }
+        // 系统设置:只往「小米澎湃 AI」页插一个进本模块的入口,不碰小爱那套逻辑。
+        if (lpparam.packageName == SETTINGS_PKG) {
+            SettingsHook.install(lpparam)
             return
         }
         if (lpparam.packageName != TARGET_PKG) return

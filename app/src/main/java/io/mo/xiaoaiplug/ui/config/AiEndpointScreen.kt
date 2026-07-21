@@ -1,6 +1,8 @@
 package io.mo.xiaoaiplug.ui.config
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -8,6 +10,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -16,6 +19,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.mo.xiaoaiplug.config.AiProvider
+import io.mo.xiaoaiplug.config.DEFAULT_SYSTEM_PROMPT
 import io.mo.xiaoaiplug.ui.ConfigViewModel
 import io.mo.xiaoaiplug.ui.TestState
 import io.mo.xiaoaiplug.ui.nav.CardContentPadding
@@ -104,13 +108,34 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                 TextField(
                     value = config.systemPrompt,
                     onValueChange = { v -> vm.update { it.copy(systemPrompt = v) } },
-                    label = "系统提示词（可留空）",
+                    label = "系统提示词（留空使用内置默认）",
                     useLabelAsPlaceholder = false,
                     minLines = 3,
                     // 不封顶的话长提示词会把输入框撑到几屏高，下面的测试连接按钮就够不着了
                     maxLines = 8,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
                 )
+                // 留空是「用默认」而不是「没有提示词」，这行得说出来 ——
+                // 想改默认的人也得先能把它填进来看见。
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "留空时使用内置默认提示词（本机 agent 人设 + 行为准则）",
+                        fontSize = MiuixTheme.textStyles.footnote2.fontSize,
+                        color = MiuixTheme.colorScheme.onBackgroundVariant,
+                        modifier = Modifier.weight(1f).padding(end = 8.dp)
+                    )
+                    TextButton(
+                        text = "填入默认",
+                        onClick = { vm.update { it.copy(systemPrompt = DEFAULT_SYSTEM_PROMPT) } },
+                        // 已经一字不差了再点没有任何效果，按钮就该是灰的
+                        enabled = config.systemPrompt != DEFAULT_SYSTEM_PROMPT,
+                        minWidth = 0.dp,
+                        insideMargin = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                    )
+                }
             }
         }
 

@@ -7,5 +7,7 @@
         <!-- 勾上自己:HookEntry 会在本模块进程里改写 ModuleStatus.isActive()，
              设置界面靠它判断 LSPosed 有没有真的激活模块。 -->
         <item>io.mo.xiaoaiplug</item>
+        <!-- 只用来在「小米澎湃 AI」页插一个本模块入口，见 SettingsHook -->
+        <item>com.android.settings</item>
     </string-array>
 </resources>
