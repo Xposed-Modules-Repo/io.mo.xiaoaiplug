@@ -37,12 +37,17 @@ object ConfigKeys {
     // 多轮上下文:把最近一小时内的问答一起发给模型(见 ChatHistory)
     const val CONTEXT_ENABLED = "context_enabled"
 
+    // 白名单直通:问话命中这条正则就完全不接管(不起泵、不调模型、不替换),原生行为照旧
+    const val SKIP_TAKEOVER_ENABLED = "skip_takeover_enabled"
+    const val SKIP_TAKEOVER_PATTERN = "skip_takeover_pattern"
+
     val ALL = listOf(
         PROVIDER, ENDPOINT, API_KEY, MODEL, SYSTEM_PROMPT, ENABLED,
         BLOCK_VIEW_JUMP, JUMP_ALLOW_WORDS,
         BLOCK_WEB_SEARCH, WEB_SEARCH_ALLOW_WORDS,
         SPEAK_ANSWER,
-        ENABLED_TOOLS, USE_NATIVE_TOOLS, CONTEXT_ENABLED
+        ENABLED_TOOLS, USE_NATIVE_TOOLS, CONTEXT_ENABLED,
+        SKIP_TAKEOVER_ENABLED, SKIP_TAKEOVER_PATTERN
     )
 }
 
@@ -127,7 +132,12 @@ class ConfigProvider : ContentProvider() {
                 val p = prefs()
                 val out = Bundle()
                 for (k in ConfigKeys.ALL) {
-                    out.putString(k, p.getString(k, ""))
+                    // getString 的第二个参数只在"这个 key 从没存过"时才生效,用户主动存成
+                    // 空串之后就再也不会命中它 —— 靠这个区分"从没配置过"(给默认值)
+                    // 和"用户手动清空"(就是要它不生效),两者在存进 SharedPreferences 后都是空串,
+                    // 只有靠"存过没存过"才分得开。
+                    val fallback = if (k == ConfigKeys.SKIP_TAKEOVER_PATTERN) DEFAULT_SKIP_TAKEOVER_PATTERN else ""
+                    out.putString(k, p.getString(k, fallback))
                 }
                 out
             }

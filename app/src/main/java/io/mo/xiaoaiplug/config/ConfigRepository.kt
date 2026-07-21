@@ -102,6 +102,8 @@ class ConfigRepository private constructor(context: Context) {
         speakAnswer = true,
         enabledTools = "",
         useNativeTools = true,
-        contextEnabled = true
+        contextEnabled = true,
+        skipTakeoverEnabled = true,
+        skipTakeoverPattern = DEFAULT_SKIP_TAKEOVER_PATTERN
     )
 }

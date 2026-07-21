@@ -15,8 +15,8 @@ android {
         // miuix-blur 要求 minSdk 33（模糊靠 RenderEffect，低版本拿不到「液态玻璃」质感）。
         minSdk = 33
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.0.1"
     }
 
     buildTypes {

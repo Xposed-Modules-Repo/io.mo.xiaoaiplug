@@ -71,7 +71,7 @@ private fun ConfigList(
     val config by vm.config.collectAsStateWithLifecycle()
 
     val enabledToolCount = Tools.enabled(config.enabledTools).size
-    val interceptCount = listOf(config.blockViewJump, config.blockWebSearch).count { it }
+    val interceptCount = listOf(config.blockViewJump, config.blockWebSearch, config.skipTakeoverEnabled).count { it }
 
     PageScaffold(title = "配置", bottomInset = bottomInset) {
         item { SmallTitle("接管") }

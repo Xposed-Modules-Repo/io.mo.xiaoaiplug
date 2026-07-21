@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.mo.xiaoaiplug.config.DEFAULT_JUMP_ALLOW_WORDS
+import io.mo.xiaoaiplug.config.DEFAULT_SKIP_TAKEOVER_PATTERN
 import io.mo.xiaoaiplug.config.DEFAULT_WEB_SEARCH_ALLOW_WORDS
 import io.mo.xiaoaiplug.ui.ConfigViewModel
 import io.mo.xiaoaiplug.ui.nav.CardHorizontalPadding
@@ -57,6 +58,21 @@ fun InterceptScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                 defaultWords = DEFAULT_WEB_SEARCH_ALLOW_WORDS
             )
         }
+
+        item { SmallTitle("白名单直通") }
+        item {
+            AllowWordsCard(
+                checked = config.skipTakeoverEnabled,
+                onCheckedChange = { on -> vm.update { it.copy(skipTakeoverEnabled = on) } },
+                title = "命中正则不接管",
+                summary = "问话命中就完全不接管，原生行为照旧（某些行为系统自带效果更佳，不建议删除）",
+                words = config.skipTakeoverPattern,
+                onWordsChange = { v -> vm.update { it.copy(skipTakeoverPattern = v) } },
+                hint = "正则表达式，留空使用默认",
+                defaultWords = DEFAULT_SKIP_TAKEOVER_PATTERN,
+                fieldLabel = "正则表达式"
+            )
+        }
     }
 }
 
@@ -73,7 +89,8 @@ private fun AllowWordsCard(
     words: String,
     onWordsChange: (String) -> Unit,
     hint: String,
-    defaultWords: String
+    defaultWords: String,
+    fieldLabel: String = "放行词"
 ) {
     Card(Modifier.fillMaxWidth()) {
         SwitchPreference(
@@ -85,7 +102,7 @@ private fun AllowWordsCard(
         TextField(
             value = words,
             onValueChange = onWordsChange,
-            label = "放行词",
+            label = fieldLabel,
             useLabelAsPlaceholder = true,
             enabled = checked,
             modifier = Modifier.fillMaxWidth()

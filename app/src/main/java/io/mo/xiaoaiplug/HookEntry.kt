@@ -576,6 +576,27 @@ class HookEntry : IXposedHookLoadPackage {
         return pkg in SETTINGS_PACKAGES
     }
 
+    // 白名单直通命中的正则,编译失败(用户手写的正则语法有误)就当不生效处理,别把整个接管功能拖垮
+    @Volatile private var skipTakeoverRegexCache: Pair<String, Regex?>? = null
+
+    // 判定这句问话是不是命中了"白名单直通"正则:命中就完全不接管,原生行为照旧
+    private fun isAiTakeoverSkip(q: String, cfg: AiConfig): Boolean {
+        if (!cfg.skipTakeoverEnabled) return false
+        val pattern = cfg.skipTakeoverPattern
+        if (pattern.isBlank()) return false // 空正则不当"匹配所有"处理,避免误配置吞掉全部问话
+        val cached = skipTakeoverRegexCache
+        val regex = if (cached != null && cached.first == pattern) {
+            cached.second
+        } else {
+            val compiled = runCatching { Regex(pattern) }
+                .onFailure { Log.w(TAG, "skip-takeover pattern invalid, ignored: $pattern", it) }
+                .getOrNull()
+            skipTakeoverRegexCache = pattern to compiled
+            compiled
+        }
+        return regex?.containsMatchIn(q) == true
+    }
+
     // 判定一句话是不是"查看类、应拦跳转"的候选(不含跳转目标判定,那个只在 startActivitySafely 时才知道)
     private fun isViewBlockCandidate(q: String, cfg: AiConfig): Boolean {
         if (!cfg.blockViewJump) return false
@@ -1243,6 +1264,13 @@ class HookEntry : IXposedHookLoadPackage {
                     // 以下是 AI 文本接管,需要功能启用
                     if (config == null || !config.enabled || !config.isUsable) {
                         return // 未启用 AI 接管,保持原生行为(但跳转拦截仍可生效)
+                    }
+                    // 白名单直通:这句命中用户自己配的正则 → 整句都不接管,原生行为原样放行。
+                    // 用在"小爱自己处理得又快又好、我们没有对应工具"的场景(比如点播歌曲) ——
+                    // 硬接管只会白起一次泵、白调一次注定失败的模型,日志里还多一条误导性的"工具调用失败"。
+                    if (isAiTakeoverSkip(queryText, config)) {
+                        Log.i(TAG, "skip takeover (whitelist pattern matched): $queryText")
+                        return
                     }
                     // 是"查看类"候选 → 预标记,以便它的 FlowTemplateToastCard 一 bindView 就被我们占位撑开
                     if (isViewBlockCandidate(queryText, config)) {

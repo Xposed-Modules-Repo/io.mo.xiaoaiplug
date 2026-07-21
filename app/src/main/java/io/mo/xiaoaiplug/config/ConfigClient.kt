@@ -27,7 +27,15 @@ data class AiConfig(
     // 原生 function calling(默认开,端点不支持会自动降级)
     val useNativeTools: Boolean = true,
     // 多轮上下文:带上最近一小时内的问答(默认开)。见 ChatHistory。
-    val contextEnabled: Boolean = true
+    val contextEnabled: Boolean = true,
+    // 白名单直通(默认开):问话命中 [skipTakeoverPattern] 就完全不接管,原生行为照旧。
+    // 用来处理"这句话小爱自己处理得又快又好,我们没有对应工具,或者两边会各干各的"的场景 ——
+    // 点播歌曲我们没有对应工具,硬接管只会白白调用一次注定失败的模型;设闹钟/提醒更糟,
+    // 小爱自己会真的设一个,我们接管后模型又用 run_shell 真的设了一个,变成两个闹钟。
+    val skipTakeoverEnabled: Boolean = true,
+    // 正则表达式,命中即跳过接管。留空即使开关开着也不生效(避免空正则误判成"全部匹配"),
+    // 且留空时按"用默认"处理,见 [DEFAULT_SKIP_TAKEOVER_PATTERN]。
+    val skipTakeoverPattern: String = DEFAULT_SKIP_TAKEOVER_PATTERN
 ) {
     /** 当前服务商。旧存档(provider 为空)落到 [AiProvider.DEFAULT]。 */
     val aiProvider: AiProvider get() = AiProvider.fromKey(provider)
@@ -63,6 +71,12 @@ const val DEFAULT_JUMP_ALLOW_WORDS = "打开,开启,进入,去,跳转,启动"
 // 用户明确要搜索时放行,不然"搜一下明天天气"也会被我们截走
 const val DEFAULT_WEB_SEARCH_ALLOW_WORDS = "搜索,搜一下,搜下,搜搜,百度,上网搜,网上搜"
 
+// 白名单直通默认正则:小爱自己处理得又快又好(或者本模块压根没有对应工具)的设备指令类问话。
+// 闹钟/提醒尤其不能接管——小爱自己会真的设一个,我们接管后模型八成也会用 run_shell 真设一个,
+// 变成两个闹钟;播放/上一首/下一首/暂停同理,本模块没有"点播指定歌曲"的工具,硬接管只会
+// 白调一次注定失败的模型。
+const val DEFAULT_SKIP_TAKEOVER_PATTERN = "闹钟|提醒|播放|上一首|下一首|暂停"
+
 object ConfigClient {
 
     private val uri: Uri = Uri.parse("content://${ConfigProvider.AUTHORITY}")
@@ -94,6 +108,7 @@ object ConfigClient {
         val speakRaw = result?.getString(ConfigKeys.SPEAK_ANSWER)
         val nativeToolsRaw = result?.getString(ConfigKeys.USE_NATIVE_TOOLS)
         val contextRaw = result?.getString(ConfigKeys.CONTEXT_ENABLED)
+        val skipTakeoverRaw = result?.getString(ConfigKeys.SKIP_TAKEOVER_ENABLED)
         return AiConfig(
             provider = result?.getString(ConfigKeys.PROVIDER).orEmpty(),
             endpoint = result?.getString(ConfigKeys.ENDPOINT).orEmpty(),
@@ -108,7 +123,11 @@ object ConfigClient {
             speakAnswer = speakRaw.isNullOrEmpty() || speakRaw == "true",
             enabledTools = result?.getString(ConfigKeys.ENABLED_TOOLS).orEmpty(),
             useNativeTools = nativeToolsRaw.isNullOrEmpty() || nativeToolsRaw == "true",
-            contextEnabled = contextRaw.isNullOrEmpty() || contextRaw == "true"
+            contextEnabled = contextRaw.isNullOrEmpty() || contextRaw == "true",
+            skipTakeoverEnabled = skipTakeoverRaw.isNullOrEmpty() || skipTakeoverRaw == "true",
+            // 「从没配置过给默认值、用户手动清空就是空」的区分已经在 ConfigProvider 里做完了
+            // (SharedPreferences.getString 的 defValue 只在 key 不存在时生效),这里不用再猜。
+            skipTakeoverPattern = result?.getString(ConfigKeys.SKIP_TAKEOVER_PATTERN).orEmpty()
         )
     }
 
@@ -129,6 +148,8 @@ object ConfigClient {
             putString(ConfigKeys.ENABLED_TOOLS, config.enabledTools)
             putString(ConfigKeys.USE_NATIVE_TOOLS, config.useNativeTools.toString())
             putString(ConfigKeys.CONTEXT_ENABLED, config.contextEnabled.toString())
+            putString(ConfigKeys.SKIP_TAKEOVER_ENABLED, config.skipTakeoverEnabled.toString())
+            putString(ConfigKeys.SKIP_TAKEOVER_PATTERN, config.skipTakeoverPattern)
         }
         return try {
             val out = context.contentResolver.call(uri, ConfigProvider.METHOD_SET, null, extras)
