@@ -23,9 +23,8 @@ jobs:
         env:
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
-          git config --global credential.helper ""
-          git remote add target "https://x-access-token:${SYNC_TOKEN}@github.com/Xposed-Modules-Repo/io.mo.xiaoaiplug.git"
-          git push target master --force
+          echo "SYNC_TOKEN length: ${#SYNC_TOKEN}"
+          git -c credential.helper= push "https://x-access-token:${SYNC_TOKEN}@github.com/Xposed-Modules-Repo/io.mo.xiaoaiplug.git" master --force
 
   sync-release:
     if: github.event_name == 'release'
@@ -40,10 +39,9 @@ jobs:
         env:
           SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
         run: |
-          git config --global credential.helper ""
-          git remote add target "https://x-access-token:${SYNC_TOKEN}@github.com/Xposed-Modules-Repo/io.mo.xiaoaiplug.git"
-          git push target master --force
-          git push target --tags --force
+          echo "SYNC_TOKEN length: ${#SYNC_TOKEN}"
+          git -c credential.helper= push "https://x-access-token:${SYNC_TOKEN}@github.com/Xposed-Modules-Repo/io.mo.xiaoaiplug.git" master --force
+          git -c credential.helper= push "https://x-access-token:${SYNC_TOKEN}@github.com/Xposed-Modules-Repo/io.mo.xiaoaiplug.git" --tags --force
 
       - name: Sync release to target repo
         env:
