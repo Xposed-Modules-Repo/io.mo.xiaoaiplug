@@ -72,3 +72,24 @@ jobs:
             -f name="${NAME}" \
             -f body="${BODY}" \
             -F prerelease="${PRERELEASE}"
+
+      - name: Download assets from source release
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          mkdir -p /tmp/release-assets
+          gh release download "${TAG}" --repo "${{ github.repository }}" --dir /tmp/release-assets --skip-existing
+
+      - name: Upload assets to target release
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          if [ -d /tmp/release-assets ] && [ "$(ls -A /tmp/release-assets)" ]; then
+            gh release upload "${TAG}" --repo "Xposed-Modules-Repo/io.mo.xiaoaiplug" /tmp/release-assets/* --clobber
+            echo "Assets uploaded successfully"
+          else
+            echo "No assets to upload"
+          fi
