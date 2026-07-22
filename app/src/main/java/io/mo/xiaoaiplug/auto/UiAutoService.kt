@@ -40,6 +40,17 @@ class UiAutoService : AccessibilityService() {
 
     companion object {
         private const val TAG = "XiaoAiProbe"
+
+        /**
+         * 微信搜索结果页的分区标题。它们和联系人行长得一样(都是短文本、都有可点击祖先,
+         * 真机 dump 确认过 clickable 分不开),只能按名字排除。
+         *
+         * **只用于拼错误文案里的候选列表**,不参与任何匹配决策 —— 所以微信哪天改了
+         * 标题措辞,最坏也就是候选列表多两行噪音,不会导致发错人或发不出去。
+         */
+        private val SECTION_HEADERS = setOf(
+            "最常使用", "功能", "联系人", "群聊", "聊天记录", "公众号", "朋友圈", "收藏", "小程序"
+        )
         const val WECHAT = "com.tencent.mm"
         const val VOICE_ASSIST = "com.miui.voiceassist"
 
@@ -455,13 +466,28 @@ class UiAutoService : AccessibilityService() {
                 return "error: 有多个读音和「$contact」相同的联系人：${ambiguous.joinToString("、")}。" +
                         "请明确说出是哪一位，我不替你猜。"
             }
+            // 列候选给模型转述,好让用户知道该怎么改口 —— 所以列的必须是**真联系人**。
+            //
+            // 过滤和匹配用同一套(networkSectionTop + 排除分区标题)。早先这里直接
+            // findAll 没过滤,于是报错长这样:
+            //   候选: 万峰吻花春眠 | 搜索网络结果
+            // 「万峰吻花春眠」是我们自己刚输进搜索框的词被微信回显了一遍,把它列成
+            // "候选联系人"纯属误导 —— 用户听到的是"没找到 X,候选有 X"。
+            //
             // 只列**像联系人名**的短文本(≤16字)。搜索结果页同时也会显示聊天记录摘要,
             // 无差别列出来等于把聊天内容抄进日志/模型上下文。
-            val seen = findAll(rootInActiveWindow) {
+            val root = rootInActiveWindow
+            val cutoff = networkSectionTop(root)
+            val b = Rect()
+            val seen = findAll(root) {
                 val t = it.text?.toString()
                 !t.isNullOrBlank() && t.length <= 16 && it.isVisibleToUser && !it.isEditable
+            }.filter {
+                it.getBoundsInScreen(b)
+                b.top < cutoff && it.text.toString() !in SECTION_HEADERS
             }.take(10).joinToString(" | ") { it.text.toString() }
-            return "error: 搜索结果里没有叫「$contact」、也没有读音与之相同的联系人。候选: $seen"
+            return "error: 搜索结果里没有叫「$contact」、也没有读音与之相同的联系人。" +
+                    if (seen.isBlank()) "结果里一个联系人都没有。" else "候选: $seen"
         }
         if (!click(hit)) return "error: 点开会话失败"
 
