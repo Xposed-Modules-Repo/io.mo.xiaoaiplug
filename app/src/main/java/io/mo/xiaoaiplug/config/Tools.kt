@@ -957,7 +957,7 @@ object Tools {
      */
     private val sendMessage = Spec(
         name = "send_message",
-        description = "微信指定给某个联系人发消息。联系人名必须和微信里显示的备注/昵称**完全一致**",
+        description = "微信指定给某个联系人发消息。",
         modelHint = "通过无障碍服务发送，解决小爱原生不支持微信双开的问题。" +
                 "名字对不上就找不到人。整个流程需要数秒。用户说「给张三发微信说晚上不回家吃饭」时用。",
         params = listOf(

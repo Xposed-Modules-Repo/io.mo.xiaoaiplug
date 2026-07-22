@@ -51,10 +51,8 @@ fun SettingsScreen(bottomInset: Dp, vm: ConfigViewModel = viewModel()) {
     val modes = remember { DarkMode.entries.toList() }
 
     PageScaffold(title = "设置", bottomInset = bottomInset) {
-        item { SmallTitle("无障碍") }
+        item { SmallTitle("通用") }
         item {
-            // 不给 insideMargin：SwitchPreference 自带内边距，再叠一层就比隔壁
-            // 「深浅色」缩进得多，一眼看出来没对齐。和主页那张「快捷开关」卡一致。
             Card(Modifier.fillMaxWidth()) {
                 // summary 和 enabled 都是常量：任何随检查状态变化的文案/灰化都会让
                 // 卡片高度或透明度抖一下，没 root 时 su 几毫秒就失败，抖动看着就是"闪一下"。
@@ -62,25 +60,11 @@ fun SettingsScreen(bottomInset: Dp, vm: ConfigViewModel = viewModel()) {
                 SwitchPreference(
                     checked = config.autoFixAccessibility,
                     onCheckedChange = { on -> vm.setAutoFixAccessibility(on) },
-                    title = "自动恢复无障碍",
-                    summary = "被清后台摘掉权限后自动写回，不用再去设置页开一次"
+                    title = "无障碍自启",
+                    summary = "打开软件自动授权无障碍"
                 )
             }
         }
-        item {
-            // 脚注放卡片外面。横向不用主页那句footnote的 12.dp —— 这句是在解释上面
-            // 那个开关，左边缘要跟开关标题对齐，而 SwitchPreference 自带内边距会把
-            // 标题往右推。18.dp 是真机比着量出来的。
-            Text(
-                text = "需要给本应用授予 root 权限。也可以执行一次 " +
-                        "adb shell pm grant ${context.packageName} " +
-                        "android.permission.WRITE_SECURE_SETTINGS，之后无需 root 且更快。",
-                fontSize = MiuixTheme.textStyles.footnote1.fontSize,
-                color = MiuixTheme.colorScheme.onBackgroundVariant,
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)
-            )
-        }
-
         item { SmallTitle("外观") }
         item {
             Card(Modifier.fillMaxWidth(), insideMargin = CardContentPadding) {
