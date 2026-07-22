@@ -4,6 +4,8 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Rect
+import android.icu.text.Transliterator
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
@@ -26,8 +28,29 @@ import android.view.accessibility.AccessibilityNodeInfo
  */
 class UiAutoService : AccessibilityService() {
 
+    /**
+     * 汉字转拉丁(带声调)的 ICU 实例。`Latin-ASCII` 那一段把声调符号去掉,
+     * 免得取到的"首字母"是个带调的字符(ǎ 之类)。构造一次复用。
+     */
+    private val han2latin: Transliterator? by lazy {
+        runCatching { Transliterator.getInstance("Han-Latin; Latin-ASCII") }
+            .onFailure { Log.w(TAG, "ICU Han-Latin 不可用,发消息将只用全名搜索", it) }
+            .getOrNull()
+    }
+
     companion object {
         private const val TAG = "XiaoAiProbe"
+
+        /**
+         * 微信搜索结果页的分区标题。它们和联系人行长得一样(都是短文本、都有可点击祖先,
+         * 真机 dump 确认过 clickable 分不开),只能按名字排除。
+         *
+         * **只用于拼错误文案里的候选列表**,不参与任何匹配决策 —— 所以微信哪天改了
+         * 标题措辞,最坏也就是候选列表多两行噪音,不会导致发错人或发不出去。
+         */
+        private val SECTION_HEADERS = setOf(
+            "最常使用", "功能", "联系人", "群聊", "聊天记录", "公众号", "朋友圈", "收藏", "小程序"
+        )
         const val WECHAT = "com.tencent.mm"
         const val VOICE_ASSIST = "com.miui.voiceassist"
 
@@ -174,6 +197,121 @@ class UiAutoService : AccessibilityService() {
     }
 
     /**
+     * 搜索结果页里「网络搜索」区块的顶端 y —— 它**以下**的行都不是联系人。
+     * 没有这个区块(结果很少时)就返回 [Int.MAX_VALUE],等于不过滤。
+     *
+     * 为什么需要它:微信会把搜索词本身、以及一堆网络搜索建议也渲染成非 editable 的
+     * TextView,其中**可能有和联系人完全同名的**。真机 dump(搜 wjcszs):
+     *   text=[文件传输助手]  id=.../odf   y=632    ← 真联系人
+     *   text=[wjcszs]        id=.../ltk   y=1223   ← 搜索词回显
+     *   text=[文件传输助手]  id=.../ltk   y=1397   ← 网络搜索建议,同名!
+     * 于是"找 text 完全等于 contact 的第一个节点"会命中哪个纯看遍历顺序 ——
+     * 实测搜「万峰吻春眠」就点中了回显那条,进了网络搜索页,把消息输进了
+     * 不是聊天框的地方,最后报"没出现发送按钮"。
+     *
+     * 按 y 切而不是按 resource-id 认:那些 id(odf/ltk)是混淆产物,微信一升级就变 ——
+     * 和 MIUI 那些类名是同一类东西,写死等于埋雷。分区标题是中文实词,稳得多。
+     */
+    private fun networkSectionTop(root: AccessibilityNodeInfo?): Int {
+        var top = Int.MAX_VALUE
+        val r = Rect()
+        for (n in findAll(root) {
+                val t = it.text?.toString().orEmpty()
+                t == "搜索网络结果" || t.startsWith("查找账号")
+            }) {
+            n.getBoundsInScreen(r)
+            if (r.top in 1 until top) top = r.top
+        }
+        return top
+    }
+
+    private sealed class ContactMatch {
+        /** [exact] = 全名完全一致;false 表示是按读音(拼音首字母)认出来的。 */
+        data class Found(
+            val node: AccessibilityNodeInfo,
+            val name: String,
+            val exact: Boolean
+        ) : ContactMatch()
+
+        /** 读音相同的候选不止一个 —— 不猜,交回给用户。 */
+        data class Ambiguous(val names: List<String>) : ContactMatch()
+
+        object NotFound : ContactMatch()
+    }
+
+    /**
+     * 在搜索结果里认出 [contact] 对应的那一条。
+     *
+     * 两级,顺序不能反:
+     *  1. **全名完全相同** —— 最高置信度,有就用它。
+     *  2. **拼音首字母相同** —— 容忍语音识别的同音字:说「张三」被识别成「章三」,
+     *     两者首字母都是 zs,仍能认出来。这是本函数存在的理由:光把首字母输进
+     *     搜索框只解决"搜得出来",认不出来照样发不了。
+     *
+     * 第 2 级**只在候选唯一时**才接受。通讯录里同时有「张三」和「章三」时返回
+     * [ContactMatch.Ambiguous],让上层报错请用户明说 —— 发错人没法撤回,
+     * 宁可失败也不赌。这是把原来"只认全名"放宽后唯一还站得住的安全边界。
+     */
+    private fun findContact(contact: String, timeoutMs: Long): ContactMatch {
+        val wantInitials = pinyinInitials(contact)
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        var lastAmbiguous: List<String> = emptyList()
+        val bounds = Rect()
+        while (SystemClock.uptimeMillis() < deadline) {
+            val root = rootInActiveWindow
+            // 「网络搜索」区块以下的行一律不看,详见 [networkSectionTop]。
+            val cutoff = networkSectionTop(root)
+            // 只看**像联系人名**的短文本。搜索框自己是 editable,排掉 ——
+            // 否则输入全名那次会"点中"输入框,永远进不了会话。
+            val rows = findAll(root) {
+                val t = it.text?.toString()
+                !t.isNullOrBlank() && t.length <= 16 && it.isVisibleToUser && !it.isEditable
+            }.filter {
+                it.getBoundsInScreen(bounds)
+                bounds.top < cutoff
+            }
+            rows.firstOrNull { it.text.toString() == contact }?.let {
+                return ContactMatch.Found(it, contact, exact = true)
+            }
+            if (wantInitials.isNotBlank()) {
+                val byInitials = rows.filter { pinyinInitials(it.text.toString()) == wantInitials }
+                val names = byInitials.map { it.text.toString() }.distinct()
+                when {
+                    names.size == 1 ->
+                        return ContactMatch.Found(byInitials.first(), names[0], exact = false)
+                    names.size > 1 -> lastAmbiguous = names
+                }
+            }
+            Thread.sleep(120)
+        }
+        return if (lastAmbiguous.isNotEmpty()) ContactMatch.Ambiguous(lastAmbiguous)
+        else ContactMatch.NotFound
+    }
+
+    /**
+     * 汉字 → 拼音首字母:`文件传输助手` → `wjcszs`。
+     *
+     * 用系统自带的 ICU(minSdk 33,android.icu 一定在),不引第三方拼音库。
+     *
+     * 返回空串表示"没有可用的首字母写法,别用它搜":
+     *  - 名字里压根没有汉字(纯英文/数字昵称)—— 那样取首字母只会得到一个字母,
+     *    搜出来一大片,不如直接用原名。
+     *  - ICU 不认识这个转换 ID(理论上不会,但拿不到就退回全名,别让整条链路断掉)。
+     */
+    private fun pinyinInitials(name: String): String {
+        val hasHan = name.any { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }
+        if (!hasHan) return ""
+        val latin = runCatching { han2latin?.transliterate(name) }.getOrNull() ?: return ""
+        // transliterate 出来是按音节用空格分开的:"wén jiàn chuán shū zhù shǒu"
+        val sb = StringBuilder()
+        for (syllable in latin.trim().split(Regex("\\s+"))) {
+            val c = syllable.firstOrNull { it.isLetterOrDigit() } ?: continue
+            sb.append(c.lowercaseChar())
+        }
+        return sb.toString()
+    }
+
+    /**
      * 往输入框写文本。优先 ACTION_SET_TEXT;失败退回剪贴板粘贴 ——
      * 中文没法走 `input text`(只认 ASCII),微信的自定义输入框也不一定吃 SET_TEXT。
      */
@@ -287,25 +425,69 @@ class UiAutoService : AccessibilityService() {
         if (back > 0) Log.i(TAG, "backed out $back screens to reach WeChat home")
         if (!click(searchBtn)) return "error: 点搜索按钮失败"
 
-        // 2. 输入联系人名。轮询等搜索页真正出现 —— 点击后立刻查会查到旧页面。
-        val searchInput = waitForNode { it.isEditable && it.isVisibleToUser }
-            ?: return "error: 没找到搜索输入框"
-        if (!setText(searchInput, contact)) return "error: 无法写入搜索框"
+        // 2+3. 往搜索框输入 → 在结果里找**完全同名**的那条。
+        //
+        // 先试拼音首字母(文件传输助手 → wjcszs),搜不到再用全名兜底。
+        // 为什么不直接换成首字母:多音字会算错(长 cháng/zhǎng、重 chóng/zhòng、
+        // 曾 zēng/céng…),ICU 只会给一个读音,和微信的索引对不上就搜不到人。
+        // 兜底那一步保证最差也就退回原来的行为。
+        val queries = listOf(pinyinInitials(contact), contact)
+            .filter { it.isNotBlank() }.distinct()
+        Log.i(TAG, "searching \"$contact\" via ${queries.joinToString(" → ")}")
 
-        // 3. 结果里找**完全同名**的那条。
-        // 注意排除搜索框自己:输入 contact 之后它的 text 也等于 contact,
-        // 不排掉的话会"点中"输入框,永远进不了会话。
-        val hit = waitForNode(5000) {
-            it.text?.toString() == contact && it.isVisibleToUser && !it.isEditable
+        var hit: AccessibilityNodeInfo? = null
+        var matchedName = contact
+        var ambiguous: List<String> = emptyList()
+        for ((i, q) in queries.withIndex()) {
+            val searchInput = waitForNode { it.isEditable && it.isVisibleToUser }
+                ?: return "error: 没找到搜索输入框"
+            if (!setText(searchInput, q)) return "error: 无法写入搜索框"
+
+            // 等的时间:最后一次给足 5 秒(和改动前一致);前面的尝试给 2.5 秒,
+            // 失败了还有下一手,不值得每次都干等满。
+            when (val m = findContact(contact, if (i == queries.lastIndex) 5000 else 2500)) {
+                is ContactMatch.Found -> {
+                    hit = m.node
+                    matchedName = m.name
+                    if (m.exact) {
+                        Log.i(TAG, "matched \"$contact\" by query \"$q\"")
+                    } else {
+                        Log.i(TAG, "matched \"$contact\" -> \"${m.name}\" by initials, query \"$q\"")
+                    }
+                }
+                is ContactMatch.Ambiguous -> ambiguous = m.names
+                ContactMatch.NotFound -> Log.i(TAG, "query \"$q\" got no match for \"$contact\"")
+            }
+            if (hit != null) break
         }
         if (hit == null) {
+            // 同音候选不止一个 → **拒绝并让用户明说**,不猜。发错人没法撤回。
+            if (ambiguous.isNotEmpty()) {
+                return "error: 有多个读音和「$contact」相同的联系人：${ambiguous.joinToString("、")}。" +
+                        "请明确说出是哪一位，我不替你猜。"
+            }
+            // 列候选给模型转述,好让用户知道该怎么改口 —— 所以列的必须是**真联系人**。
+            //
+            // 过滤和匹配用同一套(networkSectionTop + 排除分区标题)。早先这里直接
+            // findAll 没过滤,于是报错长这样:
+            //   候选: 万峰吻花春眠 | 搜索网络结果
+            // 「万峰吻花春眠」是我们自己刚输进搜索框的词被微信回显了一遍,把它列成
+            // "候选联系人"纯属误导 —— 用户听到的是"没找到 X,候选有 X"。
+            //
             // 只列**像联系人名**的短文本(≤16字)。搜索结果页同时也会显示聊天记录摘要,
             // 无差别列出来等于把聊天内容抄进日志/模型上下文。
-            val seen = findAll(rootInActiveWindow) {
+            val root = rootInActiveWindow
+            val cutoff = networkSectionTop(root)
+            val b = Rect()
+            val seen = findAll(root) {
                 val t = it.text?.toString()
                 !t.isNullOrBlank() && t.length <= 16 && it.isVisibleToUser && !it.isEditable
+            }.filter {
+                it.getBoundsInScreen(b)
+                b.top < cutoff && it.text.toString() !in SECTION_HEADERS
             }.take(10).joinToString(" | ") { it.text.toString() }
-            return "error: 搜索结果里没有与「$contact」完全同名的联系人。候选: $seen"
+            return "error: 搜索结果里没有叫「$contact」、也没有读音与之相同的联系人。" +
+                    if (seen.isBlank()) "结果里一个联系人都没有。" else "候选: $seen"
         }
         if (!click(hit)) return "error: 点开会话失败"
 
@@ -316,8 +498,13 @@ class UiAutoService : AccessibilityService() {
             ?: return "error: 会话页没找到输入框"
         if (!setText(msgInput, text)) return "error: 无法写入消息内容"
 
+        // 按读音认出来的要**说清楚**:用户说的名字和实际发给谁不是一个写法,
+        // 这是替他做的判断,不能悄悄咽下去 —— 模型会把这句念给用户听。
+        val who = if (matchedName == contact) "「$contact」"
+        else "「$matchedName」(你说的是「$contact」，按读音匹配到的)"
+
         if (!send) {
-            return "已打开与「$contact」的会话，正文「$text」已填好，等你按发送。"
+            return "已打开与${who}的会话，正文「$text」已填好，等你按发送。"
         }
 
         // 5. 发送键。输入框非空时微信才把「+」换成「发送」,这个切换要时间。
@@ -329,7 +516,7 @@ class UiAutoService : AccessibilityService() {
                     it.isVisibleToUser && it.isEnabled
         } ?: return "error: 等 8 秒仍没出现发送按钮(正文已填好，可手动发送)"
         if (!click(sendBtn)) return "error: 点发送失败(正文已填好，可手动发送)"
-        toast("已发给「$contact」：$text")
-        return "已发送给「$contact」:$text"
+        toast("已发给「$matchedName」：$text")
+        return "已发送给${who}:$text"
     }
 }
