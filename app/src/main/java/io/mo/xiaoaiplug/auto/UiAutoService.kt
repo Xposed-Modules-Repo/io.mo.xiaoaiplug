@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Rect
 import android.icu.text.Transliterator
 import android.os.Bundle
 import android.os.SystemClock
@@ -184,6 +185,35 @@ class UiAutoService : AccessibilityService() {
         return target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     }
 
+    /**
+     * 搜索结果页里「网络搜索」区块的顶端 y —— 它**以下**的行都不是联系人。
+     * 没有这个区块(结果很少时)就返回 [Int.MAX_VALUE],等于不过滤。
+     *
+     * 为什么需要它:微信会把搜索词本身、以及一堆网络搜索建议也渲染成非 editable 的
+     * TextView,其中**可能有和联系人完全同名的**。真机 dump(搜 wjcszs):
+     *   text=[文件传输助手]  id=.../odf   y=632    ← 真联系人
+     *   text=[wjcszs]        id=.../ltk   y=1223   ← 搜索词回显
+     *   text=[文件传输助手]  id=.../ltk   y=1397   ← 网络搜索建议,同名!
+     * 于是"找 text 完全等于 contact 的第一个节点"会命中哪个纯看遍历顺序 ——
+     * 实测搜「万峰吻春眠」就点中了回显那条,进了网络搜索页,把消息输进了
+     * 不是聊天框的地方,最后报"没出现发送按钮"。
+     *
+     * 按 y 切而不是按 resource-id 认:那些 id(odf/ltk)是混淆产物,微信一升级就变 ——
+     * 和 MIUI 那些类名是同一类东西,写死等于埋雷。分区标题是中文实词,稳得多。
+     */
+    private fun networkSectionTop(root: AccessibilityNodeInfo?): Int {
+        var top = Int.MAX_VALUE
+        val r = Rect()
+        for (n in findAll(root) {
+                val t = it.text?.toString().orEmpty()
+                t == "搜索网络结果" || t.startsWith("查找账号")
+            }) {
+            n.getBoundsInScreen(r)
+            if (r.top in 1 until top) top = r.top
+        }
+        return top
+    }
+
     private sealed class ContactMatch {
         /** [exact] = 全名完全一致;false 表示是按读音(拼音首字母)认出来的。 */
         data class Found(
@@ -215,12 +245,19 @@ class UiAutoService : AccessibilityService() {
         val wantInitials = pinyinInitials(contact)
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         var lastAmbiguous: List<String> = emptyList()
+        val bounds = Rect()
         while (SystemClock.uptimeMillis() < deadline) {
+            val root = rootInActiveWindow
+            // 「网络搜索」区块以下的行一律不看,详见 [networkSectionTop]。
+            val cutoff = networkSectionTop(root)
             // 只看**像联系人名**的短文本。搜索框自己是 editable,排掉 ——
             // 否则输入全名那次会"点中"输入框,永远进不了会话。
-            val rows = findAll(rootInActiveWindow) {
+            val rows = findAll(root) {
                 val t = it.text?.toString()
                 !t.isNullOrBlank() && t.length <= 16 && it.isVisibleToUser && !it.isEditable
+            }.filter {
+                it.getBoundsInScreen(bounds)
+                bounds.top < cutoff
             }
             rows.firstOrNull { it.text.toString() == contact }?.let {
                 return ContactMatch.Found(it, contact, exact = true)
