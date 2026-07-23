@@ -16,12 +16,16 @@ android {
         minSdk = 33
         targetSdk = 36
         versionCode = 2
-        versionName = "1.0.2"
+        versionName = "1.0.2.4"
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // Compose + miuix 全家桶不裁剪的话 dex 有 36MB,包体 23.8MB。
+            // 开 R8 之后绝大部分是没用到的库代码(尤其 miuix.icons 那几千个图标常量)。
+            // 注意:模块入口和 ModuleStatus 必须有 keep 规则,见 proguard-rules.pro。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
