@@ -53,6 +53,7 @@ class UiAutoService : AccessibilityService() {
         )
         const val WECHAT = "com.tencent.mm"
         const val VOICE_ASSIST = "com.miui.voiceassist"
+        const val SELF_PKG = "io.mo.xiaoaiplug"
 
         @Volatile
         var instance: UiAutoService? = null
@@ -102,6 +103,43 @@ class UiAutoService : AccessibilityService() {
         sb.append('\n')
         dumpNode(root, 0, maxDepth, revealText, sb)
         return sb.toString()
+    }
+
+    /**
+     * 提取**前台应用**界面的可读文本(给 get_screen_content 用)。
+     *
+     * 不能用 rootInActiveWindow:小爱唤起时它自己的悬浮窗常常就是活动窗口,取到的是小爱的界面。
+     * getWindows()(需 flagRetrieveInteractiveWindows,已在 ui_auto_service.xml 里开)列出所有
+     * 交互窗口,按 layer 从高到低挑第一个**非助手、非本模块、非 systemui** 的正经应用窗口。
+     *
+     * 前提:服务作用域必须覆盖目标应用 —— ui_auto_service.xml 已去掉 packageNames 限制、放开到全部应用。
+     */
+    fun dumpForegroundApp(reveal: Boolean): String {
+        val root = (windows ?: emptyList())
+            .sortedByDescending { it.layer }
+            .mapNotNull { it.root }
+            .firstOrNull {
+                val p = it.packageName?.toString()
+                p != null && p != VOICE_ASSIST && p != SELF_PKG && p != "com.android.systemui"
+            }
+            ?: rootInActiveWindow
+            ?: return "(no active window; 无障碍服务没连上或当前无窗口)"
+        val sb = StringBuilder()
+        sb.append("pkg=").append(root.packageName).append('\n')
+        extractText(root, sb, reveal)
+        return if (sb.length <= 24)
+            "(当前页面没有可提取的文本，可能是纯图像/游戏画面) pkg=${root.packageName}"
+        else sb.toString()
+    }
+
+    /** 只收有文本/描述的节点,按出现顺序拼成可读文本行。脱敏时只给字数(同 dumpTree 的隐私约定)。 */
+    private fun extractText(node: AccessibilityNodeInfo?, sb: StringBuilder, reveal: Boolean) {
+        if (node == null) return
+        val t = node.text?.toString()?.trim()
+        if (!t.isNullOrBlank()) {
+            if (reveal) sb.append(t).append('\n') else sb.append("[").append(t.length).append("字]\n")
+        }
+        for (i in 0 until node.childCount) extractText(node.getChild(i), sb, reveal)
     }
 
     private fun dumpNode(

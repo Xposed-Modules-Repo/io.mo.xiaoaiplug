@@ -87,6 +87,7 @@ object Tools {
             getSetting, setSetting,
             mediaControl, setVolume,
             currentTime, recentNotifications, getLocation, weather,
+            readSmsCode, getScreenContent, getLogcat, appStateControl,
             saveMemory
         )
     }
@@ -1440,6 +1441,191 @@ object Tools {
             else MemoryClient.save(ctx, content)
         }
     )
+
+    // ---------------------------------------------------------------- 短信验证码
+
+    private val readSmsCode = Spec(
+        name = "read_sms_code",
+        description = "读取最近收到的验证码 / 快递取件码",
+        modelHint = "用户问「验证码是多少」「取件码是多少」「刚发来的那个码」时用。" +
+                "只回最近几分钟内的数字码,默认 5 分钟。返回里最新的一条排在最前。",
+        params = listOf(
+            Param("minutes", "integer", "只看最近多少分钟内的短信，默认 5"),
+            Param("keyword", "string", "按短信内容关键词过滤(如「取件」「验证码」)，留空不过滤")
+        ),
+        handler = { args, _ ->
+            val minutes = args.optInt("minutes", 5).coerceIn(1, 180)
+            val keyword = args.optString("keyword", "").trim()
+            readSmsCodes(minutes, keyword)
+        }
+    )
+
+    /**
+     * 走 `content query` 而不是直接读 mmssms.db:那个库常是 WAL、还可能被锁,
+     * 直接读文件要 copy+解 WAL 才稳。content provider 自己处理并发,root 下能查。
+     * 只抽「码」(4~8 位数字)+ 发信方 + 时间,**不回整条短信正文**(隐私)。
+     */
+    private fun readSmsCodes(minutes: Int, keyword: String): String {
+        val raw = sh(
+            "content query --uri content://sms/inbox " +
+            "--projection address:body:date --sort \"date DESC\"",
+            limit = 64 * 1024
+        )
+        if (raw.contains("Permission Denial", true) || raw.startsWith("shell error"))
+            return "error: 读不到短信(可能没有 root 或短信库不可访问): ${raw.take(160)}"
+        val cutoff = System.currentTimeMillis() - minutes * 60_000L
+        // content query 每行一条:`Row: 0 address=..., body=..., date=1699...`
+        val rows = raw.split(Regex("(?m)^Row: \\d+ ")).map { it.trim() }.filter { it.isNotEmpty() }
+        val dateRe = Regex("date=(\\d{10,13})")
+        val bodyRe = Regex("body=(.*?), date=", RegexOption.DOT_MATCHES_ALL)
+        val addrRe = Regex("address=(.*?), body=", RegexOption.DOT_MATCHES_ALL)
+        val codeRe = Regex("(?<![0-9])[0-9]{4,8}(?![0-9])")
+        val fmt = SimpleDateFormat("HH:mm", Locale.US)
+        val sb = StringBuilder()
+        var n = 0
+        for (row in rows) {
+            val ts = dateRe.find(row)?.groupValues?.get(1)?.toLongOrNull() ?: continue
+            val tsMs = if (ts < 1_000_000_000_000L) ts * 1000 else ts
+            if (tsMs < cutoff) break   // 已按 date 倒序,更旧的不用再看
+            val body = bodyRe.find(row)?.groupValues?.get(1) ?: continue
+            if (keyword.isNotEmpty() && !body.contains(keyword)) continue
+            val code = codeRe.find(body)?.value ?: continue
+            val addr = addrRe.find(row)?.groupValues?.get(1)?.trim().orEmpty().ifBlank { "未知号码" }
+            sb.append("【").append(code).append("】 来自 ").append(addr)
+                .append("（").append(fmt.format(Date(tsMs))).append("）")
+                .append(if (n == 0) "  ← 最新" else "").append('\n')
+            if (++n >= 5) break
+        }
+        return if (n == 0) "最近 $minutes 分钟内没有找到含数字码的短信" else sb.toString()
+    }
+
+    // ---------------------------------------------------------------- 屏幕文本
+
+    private val getScreenContent = Spec(
+        name = "get_screen_content",
+        description = "读取当前屏幕上的文字内容",
+        modelHint = "用户问「屏幕上这个报错什么意思」「帮我翻译屏幕上这段」「当前页面这个价格多少」时用。" +
+                "通过无障碍服务提取**前台应用**界面的文本(自动跳过小爱自己的悬浮窗)。" +
+                "纯 Canvas / 游戏画面可能取不到文字。需要无障碍服务已开启。",
+        handler = { _, ctx ->
+            if (ctx == null) return@Spec "error: no context available"
+            // 跨进程:提取动作在模块自己的无障碍服务里,经 ConfigProvider 过桥(同 send_message)
+            val extras = android.os.Bundle().apply {
+                putBoolean("foreground", true)   // 取前台应用窗口,不是小爱悬浮窗
+                putBoolean("reveal", true)        // 要真实文本(默认桥接是脱敏的)
+            }
+            val out = ctx.contentResolver.call(
+                android.net.Uri.parse("content://io.mo.xiaoaiplug.config"),
+                "ui_dump", null, extras
+            )
+            out?.getString("result") ?: "error: 模块进程无响应（无障碍服务可能没开）"
+        }
+    )
+
+    // ---------------------------------------------------------------- 系统日志
+
+    private val getLogcat = Spec(
+        name = "get_logcat",
+        description = "抓取系统日志(logcat)，用于排查崩溃/报错",
+        modelHint = "用户问「刚才这个应用怎么闪退的」「看下报错日志」「抓一下 XX 的日志」时用。" +
+                "默认只取最近 200 行 Error 级。可按 tag 或应用包名过滤。",
+        params = listOf(
+            Param("lines", "integer", "取最近多少行，默认 200"),
+            Param("priority", "string", "最低日志级别，默认 E", enum = listOf("V", "D", "I", "W", "E")),
+            Param("tag", "string", "只看某个 TAG，留空不限"),
+            Param("package", "string", "只看某个应用(按其运行进程过滤)，留空不限")
+        ),
+        handler = { args, _ -> runLogcat(args) }
+    )
+
+    private fun runLogcat(args: JSONObject): String {
+        val lines = args.optInt("lines", 200).coerceIn(1, 2000)
+        val pri = args.optString("priority", "E").trim().uppercase()
+            .let { if (it in setOf("V", "D", "I", "W", "E")) it else "E" }
+        val tag = args.optString("tag", "").trim()
+        val pkg = args.optString("package", "").trim()
+        val filter = if (tag.isNotEmpty())
+            "${shellQuote("$tag:$pri")} ${shellQuote("*:S")}"
+        else shellQuote("*:$pri")
+        val base = "logcat -d -v time -t $lines"
+        val cmd = if (pkg.isNotEmpty())
+            "P=\$(pgrep -f ${shellQuote(pkg)} | head -1); " +
+                "if [ -z \"\$P\" ]; then echo '(该应用当前没有运行的进程，无法按它过滤)'; " +
+                "else $base --pid=\$P $filter; fi"
+        else "$base $filter"
+        return sh(cmd)
+    }
+
+    // ---------------------------------------------------------------- 应用状态控制
+
+    /**
+     * 冻结/强杀的硬黑名单:这些一旦被停用或强杀会导致系统异常、甚至把本模块或小爱自己弄死。
+     * force_stop 对它们也一律拒绝 —— 强杀 systemui/home 同样会黑屏。
+     */
+    private val PROTECTED_PKGS = setOf(
+        "android", "com.miui.voiceassist", "io.mo.xiaoaiplug",
+        "com.miui.home", "com.android.systemui", "com.android.settings",
+        "com.lbe.security.miui", "com.miui.securitycenter"
+    )
+
+    private val appStateControl = Spec(
+        name = "app_state_control",
+        description = "强制停止 / 冻结 / 解冻应用，或清理缓存",
+        modelHint = "「强行关掉抖音」「杀掉后台的微信」→ action=force_stop；" +
+                "「把XX冻结起来」→ freeze；「解冻XX」→ unfreeze；" +
+                "「清理缓存/清理垃圾」→ trim_cache(不需要 package)。" +
+                "冻结只对第三方应用生效，系统关键应用会被拒绝。",
+        params = listOf(
+            Param("action", "string", "要执行的操作", required = true,
+                enum = listOf("force_stop", "freeze", "unfreeze", "trim_cache")),
+            Param("package", "string", "目标应用显示名或包名(trim_cache 不需要)")
+        ),
+        mutating = true,
+        handler = { args, ctx -> runAppStateControl(args, ctx) }
+    )
+
+    private fun runAppStateControl(args: JSONObject, ctx: Context?): String {
+        val action = args.optString("action", "").trim()
+        if (action == "trim_cache") {
+            val r = sh("pm trim-caches 100G")
+            return "已尝试清理各应用缓存。\n$r"
+        }
+        val name = args.optString("package", "").trim()
+        if (name.isEmpty()) return "error: 需要指定应用(package)"
+        val pm = ctx?.packageManager
+        val pkg = resolvePackage(pm, name) ?: return "error: 没找到应用 \"$name\""
+        if (pkg in PROTECTED_PKGS)
+            return "error: $pkg 是系统关键应用，不能对它做强杀/冻结(会导致系统或本功能异常)，已拒绝。"
+        return when (action) {
+            "force_stop" -> {
+                val r = sh("am force-stop ${shellQuote(pkg)}")
+                if (r.trimStart().startsWith("error", true)) "error: $r" else "已强制停止 $pkg"
+            }
+            "freeze" -> {
+                val info = pm?.let { runCatching { it.getApplicationInfo(pkg, 0) }.getOrNull() }
+                val isSystem = info == null ||
+                        (info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+                if (isSystem)
+                    return "error: $pkg 是系统应用，冻结可能导致系统异常，已拒绝。冻结只对第三方应用开放。"
+                sh("pm disable-user --user 0 ${shellQuote(pkg)}")
+                "已冻结 $pkg（应用被停用、图标消失；说\"解冻$name\"可恢复）"
+            }
+            "unfreeze" -> {
+                sh("pm enable ${shellQuote(pkg)}")
+                "已解冻 $pkg"
+            }
+            else -> "error: 未知操作 \"$action\""
+        }
+    }
+
+    /** 按显示名或包名把用户说的应用解析成包名:先精确包名 → 精确显示名 → 模糊显示名。 */
+    private fun resolvePackage(pm: android.content.pm.PackageManager?, name: String): String? {
+        if (pm == null) return null
+        val apps = pm.getInstalledApplications(0)
+        return apps.firstOrNull { it.packageName == name }?.packageName
+            ?: apps.firstOrNull { pm.getApplicationLabel(it).toString().equals(name, true) }?.packageName
+            ?: apps.firstOrNull { pm.getApplicationLabel(it).toString().contains(name, true) }?.packageName
+    }
 
     // ---------------------------------------------------------------- shell 实现
 

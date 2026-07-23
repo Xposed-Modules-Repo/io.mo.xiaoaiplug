@@ -69,6 +69,15 @@ private const val AGENT_ACTION_CLASS = "kh0.s0"
 // (isScenesOp / isSimulatingClick),说明返回 null 是小爱支持的正常结果,拦起来安全。
 private const val TOAST_OPERATION_CLASS = "jb0.vd"
 
+// UIControllerNavigate 操作(jb0.ue)—— 小爱对"杀/清后台"的**原生**反应其实不是杀,
+// 而是走 NavigateOp.OPEN_BACKGROUND_APPS 分支、由 z0() 模拟按下最近任务键
+// (o6.setSimulateKeyEvent(187) = KEYCODE_APP_SWITCH),把系统"最近任务/清后台"界面划出来。
+// 真机 trace(2026-07-23,hook BaseOperation.<init> + killAppByPkgName 双向确认):
+// 这条命令**从不调 killAppByPkgName**,那段"清后台动画"就是这次 APP_SWITCH。真正的杀是我们干的,
+// 所以我们接管这轮时要把这一下按键跳过 —— 否则先划出最近任务界面、我们再 force-stop,两边各干各的。
+// z0() 只在 OPEN_BACKGROUND_APPS 这一个分支被调,单独拦它不影响别的导航(回主页/退小爱等)。
+private const val UI_NAV_OPERATION_CLASS = "jb0.ue"
+
 // SpeakContentManager —— 小爱"这一轮该念什么"的权威文本源。
 // jb0.hb 把 SpeakStream 分片 addFragment() 累积进去;卡片上那个喇叭按钮
 // (TTSPlayView.k())在 dialogId 匹配时**优先读 b2.getText() 而不是卡片文本**:
@@ -146,6 +155,28 @@ private val SEND_MESSAGE_VERBS = listOf("发消息", "发信息", "发条", "发
 // 后面的否定预查是为了挡掉**问句**:「微信怎么发朋友圈」结构上也是
 // 微信…发…,但那是在问怎么做,不是让我们发。
 private val SEND_MESSAGE_PATTERN = Regex("(?:给|微信).{1,15}?发(?!朋友圈|现|视频号|布)")
+
+// 「杀后台/清后台/强制停止应用」类指令。和发消息类一样**必须由我们接管**:
+// 小爱原生要么做不到、要么只把你送到"最近任务/应用管理"页让你自己动手,真正的
+// am force-stop / kill 只有我们的 root shell 能干。真机日志(2026-07-23)复现:模型
+// 已经 ps 出 PID、也拼好了 `kill -9 10063` / `am force-stop bin.mt.plus`,但那轮动作闸
+// 没为它打开,命令被 Tools.execute 拦下(dur=0ms),模型只好回"没被本模块接管,没法帮你杀"。
+//
+// 判据:杀类动词 + 「后台/进程」这个对象锚点。**必须要锚点** —— 只看动词会误伤
+// "关闭wifi""清理垃圾""停止播放"这些和杀进程无关的话;而"后台/进程"一出现,
+// 意图基本就锁定在结束应用上了。另外单列一条"强制/强行停止<某物>":它自带杀意、
+// 不依赖锚点(用户常说"强制停止MT管理器"而不带"后台")。
+// 自带杀意的动词:不需要"后台/进程"锚点也算(用户认可的放宽,覆盖"杀掉抖音""干掉微信")。
+private val KILL_BG_HARD_VERBS = listOf("杀掉", "杀死", "杀", "干掉")
+// 语气较软的动词:必须配"后台/进程"锚点,否则会误伤"关闭wifi""清理垃圾""停掉音乐"。
+private val KILL_BG_VERBS = listOf("清理", "清掉", "清", "关掉", "关闭", "结束", "停掉")
+private val KILL_BG_ANCHORS = listOf("后台", "进程")
+// 强制/强行 + 停止/关闭… 一律算(不需锚点),覆盖"强行关掉抖音""强制退出微信"。
+private val KILL_BG_STRONG = Regex("(强制|强行)(停止|关闭|关掉|退出|杀)|force.?stop", RegexOption.IGNORE_CASE)
+
+// 「冻结/解冻/清理缓存」类指令。和杀后台同为 app_state_control 的动作,同样要接管才放行动作闸,
+// 但不触发小爱的"清后台动画"(那只跟杀/清后台绑,见 [ownsKillTurnNow])。
+private val APP_CTRL_PATTERN = Regex("冻结|解冻|清(理|除|一下|一下子)?(缓存|垃圾)")
 
 // 判定"跳转目标确实是系统设置/系统应用",避免误伤导航/打开第三方应用之类的正常跳转
 class HookEntry : IXposedHookLoadPackage {
@@ -324,6 +355,7 @@ class HookEntry : IXposedHookLoadPackage {
         hookToastCard(lpparam.classLoader)
         hookIntentLaunch(lpparam.classLoader)
         hookToastCardBind(lpparam.classLoader)
+        hookBackgroundAppsNav(lpparam.classLoader)
     }
 
     // 「查看类」不跳转:拦截 IntentUtilsWrapper.startActivitySafely(Intent, boolean)。
@@ -444,7 +476,8 @@ class HookEntry : IXposedHookLoadPackage {
                         // 这里的(见 setQueryInfo 那处注释),发消息这条路当时漏打了。
                         if (config != null && config.enabled && config.speakAnswer &&
                             dialogId.isNotBlank() &&
-                            (isViewBlockCandidate(text, config) || isSendMessageCommand(text))
+                            (isViewBlockCandidate(text, config) || isSendMessageCommand(text) ||
+                                isKillBackgroundCommand(text) || isAppControlCommand(text))
                         ) {
                             pendingViewAnswer.add(dialogId)
                             startMutePump(dialogId)
@@ -506,6 +539,43 @@ class HookEntry : IXposedHookLoadPackage {
             } catch (t: Throwable) {
                 Log.i(TAG, "hook vd.${m.name} fail: $t")
             }
+        }
+    }
+
+    // 拦掉小爱对"杀/清后台"的原生反应:UIControllerNavigate.OPEN_BACKGROUND_APPS 会由 z0()
+    // 模拟按下最近任务键(KEYCODE_APP_SWITCH),把系统"清后台"界面划出来。我们已经接管这轮、
+    // 由 root shell 真正 force-stop,所以这下按键跳过即可 —— 否则先划出最近任务界面再由我们杀,
+    // 观感是两边各干各的。只在 ownsKillTurnNow()(确是我们接管的杀后台轮)时跳过,不误伤正常导航。
+    private fun hookBackgroundAppsNav(cl: ClassLoader) {
+        val clazz = try {
+            cl.loadClass(UI_NAV_OPERATION_CLASS)
+        } catch (e: Throwable) {
+            Log.i(TAG, "$UI_NAV_OPERATION_CLASS not found: $e")
+            return
+        }
+        // z0() 无参、只做 setSimulateKeyEvent(187);按名字精确取,取不到就算了(混淆改名时不至于拖垮别的)
+        val method = clazz.declaredMethods.firstOrNull {
+            it.name == "z0" && it.parameterTypes.isEmpty()
+        }
+        if (method == null) {
+            Log.i(TAG, "ue.z0() not found (obfuscation changed?)")
+            return
+        }
+        try {
+            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    try {
+                        if (!ownsKillTurnNow()) return
+                        Log.i(TAG, "skip native OPEN_BACKGROUND_APPS (kill taken over): \"$lastQueryText\"")
+                        param.result = null   // void:置结果即跳过原方法,不模拟按键、不划出最近任务
+                    } catch (t: Throwable) {
+                        Log.i(TAG, "hookBackgroundAppsNav error: $t")
+                    }
+                }
+            })
+            Log.i(TAG, "hooked ue.z0 (OPEN_BACKGROUND_APPS)")
+        } catch (t: Throwable) {
+            Log.i(TAG, "hook ue.z0 fail: $t")
         }
     }
 
@@ -631,6 +701,23 @@ class HookEntry : IXposedHookLoadPackage {
     }
 
     /**
+     * 是不是"杀后台/清后台/强制停止应用"。命中即由我们接管:起静音泵按住小爱那句
+     * "已为你清理/只能帮你到这啦",并把动作闸打开(允许模型用 run_shell 跑 am force-stop / kill)。
+     *
+     * 见 [KILL_BG_VERBS] 处的注释:动词 + 「后台/进程」锚点,或"强制/强行停止"独立成立。
+     */
+    private fun isKillBackgroundCommand(q: String): Boolean {
+        if (q.isBlank()) return false
+        if (KILL_BG_STRONG.containsMatchIn(q)) return true
+        if (KILL_BG_HARD_VERBS.any { q.contains(it) }) return true
+        return KILL_BG_VERBS.any { q.contains(it) } && KILL_BG_ANCHORS.any { q.contains(it) }
+    }
+
+    /** 是不是"冻结/解冻/清理缓存"类。命中即接管、放行 app_state_control(冻结/清缓存)。 */
+    private fun isAppControlCommand(q: String): Boolean =
+        q.isNotBlank() && APP_CTRL_PATTERN.containsMatchIn(q)
+
+    /**
      * 这一轮交互归不归我们 —— 所有"要不要拦"的判定都问这一个问题。
      *
      * **刻意不看跳转目标是哪个 App。** 早先的做法是"问话是查看类 **且** 目标在
@@ -650,7 +737,14 @@ class HookEntry : IXposedHookLoadPackage {
         val cfg = lastConfig ?: return false
         // 问话要足够新(和这次跳转是同一次交互);太旧就不管,避免误伤后续手动/其它跳转
         if (System.currentTimeMillis() - lastQueryTime > 12_000L) return false
-        return viewBlockCandidateNow(cfg)
+        if (viewBlockCandidateNow(cfg)) return true
+        // 杀后台类:我们已经接管这轮的 force-stop/kill,小爱原生那个"清理最近任务"动作
+        // (会先放一段系统清后台动画)就不该再放出来 —— 否则先播清理动画、我们再杀,
+        // 观感是两边各干各的。这条原生动作和查看类的跳转走的是同几个收口(AgentAction /
+        // IntentLaunch / startActivitySafely),所以在这里一并认领即可,不用新挂 hook。
+        // 只在 AI 接管开启时拦:关了我们不杀,得让小爱原生清后台照常。
+        if (cfg.enabled && killBackgroundCommandNow()) return true
+        return false
     }
 
     /**
@@ -678,6 +772,26 @@ class HookEntry : IXposedHookLoadPackage {
     /** 「这轮是不是发消息类」的当下判定。同样两个文本都看,理由见 [viewBlockCandidateNow]。 */
     private fun sendMessageCommandNow(): Boolean =
         currentQueryTexts().any { isSendMessageCommand(it) }
+
+    /** 「这轮是不是杀后台类」的当下判定。同样两个文本都看,理由见 [viewBlockCandidateNow]。 */
+    private fun killBackgroundCommandNow(): Boolean =
+        currentQueryTexts().any { isKillBackgroundCommand(it) }
+
+    /** 「这轮是不是冻结/清缓存类」的当下判定。 */
+    private fun appControlCommandNow(): Boolean =
+        currentQueryTexts().any { isAppControlCommand(it) }
+
+    /**
+     * 这轮是不是"我们已接管的杀后台"。用来决定要不要拦小爱那下"按最近任务键"的原生动作
+     * (见 [UI_NAV_OPERATION_CLASS])。比 [ownsCurrentTurn] 收得更窄:只认杀后台类,不含查看类 ——
+     * "查看后台应用"这种用户其实是想看最近任务的,不该把界面拦掉。
+     */
+    private fun ownsKillTurnNow(): Boolean {
+        val cfg = lastConfig ?: return false
+        if (!cfg.enabled) return false
+        if (System.currentTimeMillis() - lastQueryTime > 12_000L) return false
+        return killBackgroundCommandNow()
+    }
 
     private fun currentQueryTexts(): List<String> {
         val out = ArrayList<String>(2)
@@ -1404,6 +1518,20 @@ class HookEntry : IXposedHookLoadPackage {
                         pendingViewAnswer.add(dialogId)
                         if (config.speakAnswer) startMutePump(dialogId)
                         Log.i(TAG, "send-message command, taking over: $queryText")
+                    }
+                    // 杀后台类:小爱原生做不到真正的 force-stop/kill,我们接管。
+                    // 加进 pendingViewAnswer 就把动作闸打开了(allowMutating 的判据之一),
+                    // 模型这轮的 am force-stop / kill 才不会被 Tools.execute 拦成 dur=0ms。
+                    if (killBackgroundCommandNow()) {
+                        pendingViewAnswer.add(dialogId)
+                        if (config.speakAnswer) startMutePump(dialogId)
+                        Log.i(TAG, "kill-background command, taking over: $queryText")
+                    }
+                    // 冻结/解冻/清缓存类:同样接管以放行 app_state_control 动作闸。
+                    if (appControlCommandNow()) {
+                        pendingViewAnswer.add(dialogId)
+                        if (config.speakAnswer) startMutePump(dialogId)
+                        Log.i(TAG, "app-control command, taking over: $queryText")
                     }
                     if (queryTexts.containsKey(dialogId)) return // 同一个 dialogId 只处理一次
                     queryTexts[dialogId] = queryText

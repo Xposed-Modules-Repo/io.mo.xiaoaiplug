@@ -174,9 +174,20 @@ class ConfigProvider : ContentProvider() {
                 // 先自愈。MIUI 清后台会把无障碍权限摘掉,详见 AccessibilityGuard ——
                 // 不补这一下,用户每清一次后台就得手动去设置页开一次。
                 val failure = AccessibilityGuard.ensureRunning(context!!, autoFixEnabled())
+                // 无 extras = 老的调试用途:脱敏、当前活动窗口(dumpTree 默认)。
+                // get_screen_content 传 foreground+reveal:取前台应用窗口、给真实文本。
+                val reveal = extras?.getBoolean("reveal") ?: false
+                val foreground = extras?.getBoolean("foreground") ?: false
+                val svc = UiAutoService.instance
                 Bundle().apply {
-                    putString("result", failure ?: UiAutoService.instance?.dumpTree()
-                        ?: "error: 无障碍服务刚连上又断了")
+                    putString(
+                        "result",
+                        failure ?: when {
+                            svc == null -> "error: 无障碍服务刚连上又断了"
+                            foreground -> svc.dumpForegroundApp(reveal)
+                            else -> svc.dumpTree(revealText = reveal)
+                        }
+                    )
                 }
             }
             METHOD_SEND_MESSAGE -> {

@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  只声明微信一个包:无障碍服务能读到它被授权应用的**全部**界面内容,
-  范围能收窄就收窄。以后要支持别的应用再显式加进来。
+  不再限定 packageNames:get_screen_content 要读**任意前台应用**的屏幕文本,
+  无障碍服务只能看到作用域内的窗口,所以放开到全部应用(原先只授权微信是为发消息)。
+  代价:服务能读到所有应用的界面内容 —— dumpTree/extractText 默认脱敏(只给字数),
+  只有 get_screen_content 显式 reveal=true 时才回真实文本。
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewFocused"
@@ -9,5 +11,4 @@
     android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:description="@string/ui_auto_description"
-    android:notificationTimeout="100"
-    android:packageNames="com.tencent.mm" />
+    android:notificationTimeout="100" />
