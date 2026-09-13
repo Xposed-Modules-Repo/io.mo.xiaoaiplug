@@ -9,6 +9,8 @@ import io.mo.xiaoaiplug.config.AiConfig
 import io.mo.xiaoaiplug.config.ChatHistory
 import io.mo.xiaoaiplug.config.ConfigClient
 import io.mo.xiaoaiplug.hook.SettingsHook
+import io.mo.xiaoaiplug.hook.ReplyTurns
+import io.mo.xiaoaiplug.hook.ReplyCards
 import io.mo.xiaoaiplug.hook.dex.DexAdapter
 import io.mo.xiaoaiplug.hook.dex.TargetSymbols
 import de.robv.android.xposed.IXposedHookLoadPackage
@@ -42,9 +44,6 @@ private const val ASR_RECOGNIZE_RESULT = "SpeechRecognizer.RecognizeResult"
 // 念出来的答案上限。模型答案可能很长(还可能夹着工具输出),整段念完既吵又没法打断。
 // 超出部分只截断不摘要 —— 卡片上是全文,想看细节看屏幕。
 private const val MAX_SPEAK_CHARS = 220
-
-// 同一句问话在这个时间窗内出现的多个 dialogId,算作同一次交互
-private const val UTTERANCE_WINDOW_MS = 15_000L
 
 // 兜底跳转的目标:小米全局搜索(act=android.intent.action.SEARCH, dat=qsb://query/...)
 private const val QUICK_SEARCH_PKG = "com.android.quicksearchbox"
@@ -185,6 +184,10 @@ class HookEntry : IXposedHookLoadPackage {
 
     /** dialogId -> 会话状态。取代原先按 dialogId 关联的那 11 个表。 */
     private val sessions = ConcurrentHashMap<String, DialogSession>()
+    private val replyTurns = ReplyTurns { android.os.SystemClock.elapsedRealtime() }
+    private val replyCards = ReplyCards<Any>()
+    private val cardSinks = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, WeakReference<Any>>())
+    private val replyAddDepth = ThreadLocal.withInitial { 0 }
 
     /** 取(不存在则建)。**写**路径用它 —— 一个 dialogId 第一次出现在哪条 hook 上是不确定的。 */
     private fun session(dialogId: String): DialogSession =
@@ -200,6 +203,8 @@ class HookEntry : IXposedHookLoadPackage {
 
     // 标记"这次 sendStreamData 调用是我们自己发起的",避免被自己的 hook 再拦一次
     private val injectingNow = ThreadLocal.withInitial { false }
+    // 同一个 RN bridge 可能关联多个 dialogId，只发送一次最终答案。
+    private val injectedBridges = java.util.WeakHashMap<Any, String>() // 仅主线程访问
 
     private var sendStreamDataMethod: java.lang.reflect.Method? = null
 
@@ -260,24 +265,13 @@ class HookEntry : IXposedHookLoadPackage {
     // 标记"这次 recordToSpeak 是我们自己写的",别被自己的 hook 压掉
     private val writingHistory = ThreadLocal.withInitial { false }
 
-    // ——— 按「一次问话」而不是按 dialogId 归拢 ———
-    // 实测同一句"查看电量"小爱会在 388ms 内派发**两个不同的 dialogId**,各自走一遍 setQueryInfo。
-    // 老的去重是 queryTexts.containsKey(dialogId),两个 id 全放行 → 调两次模型 → 得到两个
-    // 措辞不同的答案 → 先后念两遍(n1.speakTts 每次先 stopPlay,第一句念一半被打断)。
-    // 听感就是"抢答"。这里改成按 问话原文+时间窗 归拢:同一句话只调一次模型、只念一次,
-    // 但所有 dialogId 都登记进来,好让它们各自的卡片都能拿到同一个答案。
-    //
-    // 问话原文 -> (归拢用的 key, 最近一次出现时间)
-    private val utteranceLastSeen = ConcurrentHashMap<String, Pair<String, Long>>()
-
+    // ReplyTurns 用 ASR 对话身份归拢一轮；没有 ASR 时兼容短时间内的同文重复派发。
+    // 用户再次说同一句话会得到新 key，ASR 与后续改写 query 共用一次请求。
     // key -> 属于这次问话的所有 dialogId
     private val utteranceDialogs = ConcurrentHashMap<String, MutableSet<String>>()
 
     // key -> 这次问话的答案(只调一次模型)
     private val utteranceAnswers = ConcurrentHashMap<String, String>()
-
-    // 已经发起过模型调用的 key,防止并发重复发起
-    private val utteranceCalling = ConcurrentHashMap.newKeySet<String>()
 
     // 已经念过的 key,保证一次问话只出一次声
     private val spokenUtterances = ConcurrentHashMap.newKeySet<String>()
@@ -308,7 +302,7 @@ class HookEntry : IXposedHookLoadPackage {
             return
         }
         if (lpparam.packageName != TARGET_PKG) return
-        Log.i(TAG, "loaded into $TARGET_PKG process=${lpparam.processName}")
+        Log.i(TAG, "loaded into $TARGET_PKG process=${lpparam.processName} revision=reply-ui-2")
         targetClassLoader = lpparam.classLoader
 
         // 动态 Dex 搜索与自适应符号解析 (当检测到小爱更新或初次运行时通过 DexKit 扫描，其余走缓存)
@@ -367,9 +361,8 @@ class HookEntry : IXposedHookLoadPackage {
         }
 
         hookOperationManager(lpparam.classLoader)
-        hookRnCard(lpparam.classLoader)
-        hookRnCardStop(lpparam.classLoader)
-        hookRnJsReady(lpparam.classLoader)
+        hookNativeAudio(lpparam.classLoader)
+        hookAuthoritativeText(lpparam.classLoader)
         hookBridge(lpparam.classLoader)
         hookCardBaseDiagnostic(lpparam.classLoader)
         hookSettingsJump(lpparam.classLoader)
@@ -379,7 +372,6 @@ class HookEntry : IXposedHookLoadPackage {
         hookCardSinks(lpparam.classLoader)
         hookAsrResult(lpparam.classLoader)
         hookAgentAction(lpparam.classLoader)
-        hookToastCard(lpparam.classLoader)
         hookIntentLaunch(lpparam.classLoader)
         hookToastCardBind(lpparam.classLoader)
         hookBackgroundAppsNav(lpparam.classLoader)
@@ -461,7 +453,7 @@ class HookEntry : IXposedHookLoadPackage {
         } catch (t: Throwable) { null }
         if (uiManagerClass != null) {
             for (m in uiManagerClass.declaredMethods) {
-                if (m.name in listOf("moveTabHostMainActivityToBackground", "onStopEngine", "resetUiStateAsCapsuleShow")) {
+                if (m.name in listOf("moveTabHostMainActivityToBackground", "resetUiStateAsCapsuleShow")) {
                     try {
                         XposedBridge.hookMethod(m, object : XC_MethodHook() {
                             override fun afterHookedMethod(param: MethodHookParam) {
@@ -517,23 +509,19 @@ class HookEntry : IXposedHookLoadPackage {
                         ).orEmpty()
 
                         val ctx = currentApplicationContext()
-                        val config = if (ctx != null) ConfigClient.read(ctx) else null
+                        val config = readHookConfig(ctx)
                         if (config != null) lastConfig = config
 
-                        // ASR 会把一句话切成两段:实测"现在的WIFI WIFI密码是多少"之后 1.8 秒
-                        // 又来了一次 asr final text="呜呜"(说话的尾音)。它带着新 dialogId 走完整流程,
-                        // 于是停了我们的静音泵、改写了 lastQueryText,连带小爱自己也重置了卡片列表,
-                        // 把我们 1.5 秒前加的占位卡冲掉 —— 现象就是"有语音没卡片"。
-                        // 这里挡掉这种碎片:模型调用还在飞、时间很近、内容又短又不像提问,就当没听见。
-                        val elapsed = System.currentTimeMillis() - lastQueryTime
-                        val junk = text.length <= 3 &&
-                            (config == null || !isViewBlockCandidate(text, config))
-                        if (junk && elapsed < 5_000L && utteranceCalling.isNotEmpty()) {
-                            Log.i(TAG, "ignore ASR fragment \"$text\" (answer still pending, ${elapsed}ms after last query)")
-                            return
+                        // 以 dialogId 区分新一轮，不能把“几点”“停止”等短指令当成尾音吞掉。
+                        if (dialogId.isBlank()) return
+                        val wasOurs = replyTurns.ownsCurrent()
+                        val previousKey = replyTurns.keyFor(lastDialogId)
+                        val turn = replyTurns.capture(dialogId, text, asr = true)
+                        if (!replyTurns.isCurrent(turn.key)) return
+                        if (turn.key != previousKey) {
+                            stopMutePump()
+                            if (wasOurs) stopOurTts()
                         }
-
-                        if (text != lastQueryText) stopMutePump()
                         lastQueryText = text
                         lastQueryTime = System.currentTimeMillis()
                         // 原文单独留一份 —— 稍后 setQueryInfo 会用改写过的版本覆盖 lastQueryText
@@ -551,13 +539,12 @@ class HookEntry : IXposedHookLoadPackage {
                         // 晚了 84ms,那句"暂不支持微信双开功能"就漏出去了 —— 现象是先播报
                         // 失败话术、然后消息才被我们发出去。查看类当初就是因为这个把泵前移到
                         // 这里的(见 setQueryInfo 那处注释),发消息这条路当时漏打了。
-                        if (config != null && config.enabled && config.speakAnswer &&
-                            dialogId.isNotBlank() &&
-                            (isViewBlockCandidate(text, config) || isSendMessageCommand(text) ||
-                                 isKillBackgroundCommand(text) || isAppControlCommand(text))
-                        ) {
-                            session(dialogId).pendingViewAnswer = true
+                        if (config != null && config.enabled && config.isUsable &&
+                            !isAiTakeoverSkip(text, config)) {
+                            replyTurns.claim(turn.key)
+                            session(dialogId).takenOver = true
                             startMutePump(dialogId)
+                            startTrackedCall(turn.key, dialogId, turn.text, config)
                         }
                     } catch (t: Throwable) {
                         Log.i(TAG, "hookAsrResult error: $t")
@@ -585,12 +572,14 @@ class HookEntry : IXposedHookLoadPackage {
             Log.i(TAG, "${symbols.toastOperationClass} not found: $e")
             return
         }
+        val baseCard = cl.loadClass("com.xiaomi.voiceassistant.card.a")
         val targets = clazz.declaredMethods.filter {
-            (it.name == "g0" || it.name == "i0") &&
-                it.parameterTypes.size == 1 && it.parameterTypes[0] == Integer.TYPE
+            it.parameterTypes.contentEquals(arrayOf(Integer.TYPE)) &&
+                baseCard.isAssignableFrom(it.returnType) &&
+                !java.lang.reflect.Modifier.isStatic(it.modifiers)
         }
         if (targets.isEmpty()) {
-            Log.i(TAG, "${symbols.toastOperationClass}.g0/i0(int) not found")
+            Log.i(TAG, "${symbols.toastOperationClass} card factory (int)->Card not found")
             return
         }
         for (m in targets) {
@@ -1124,9 +1113,33 @@ class HookEntry : IXposedHookLoadPackage {
                             // 怀疑它压根没被加进渲染列表。这个 hook 原来是静默的,
                             // "addCard 没被调用"和"调用了但卡没上屏"看不出区别 —— 一轮就几条,打得起。
                             val c = param.args.getOrNull(0)
+                            if (c != null) {
+                                try {
+                                    val replacement = replyCardForSink(cl, c)
+                                    if (replacement != null) {
+                                        if (replyAddDepth.get() == 0 && replacement !== c && cardSinks[replacement]?.get() != null) {
+                                            Log.i(TAG, "[reply-ui] skip duplicate source card for ${replyCards.keyFor(replacement)}")
+                                            param.result = null
+                                            return
+                                        }
+                                        replyAddDepth.set((replyAddDepth.get() ?: 0) + 1)
+                                        param.setObjectExtra("replyCardAdd", true)
+                                        // 两层 sink（浮窗 -> 分发器）会经过同一个对象，只替换参数，不再次 addCard。
+                                        param.args[0] = replacement
+                                        cardSinks[replacement] = WeakReference(param.thisObject)
+                                        if (replacement !== c) Log.i(TAG, "[reply-ui] replace ${c.javaClass.name} with native text card@${System.identityHashCode(replacement)}")
+                                    }
+                                } catch (t: Throwable) { Log.w(TAG, "[reply-ui] card replacement failed: $t") }
+                            }
                             Log.i(TAG, "[sink] ${param.thisObject.javaClass.simpleName}" +
                                     "@${System.identityHashCode(param.thisObject)} addCard " +
                                     "${c?.javaClass?.name}@${System.identityHashCode(c)}")
+                        }
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (param.getObjectExtra("replyCardAdd") == true) {
+                                replyAddDepth.set(((replyAddDepth.get() ?: 0) - 1).coerceAtLeast(0))
+                                if (param.hasThrowable()) param.args.getOrNull(0)?.let { cardSinks.remove(it) }
+                            }
                         }
                     })
                     Log.i(TAG, "hooked card sink $className.addCard")
@@ -1160,107 +1173,62 @@ class HookEntry : IXposedHookLoadPackage {
 
     // 保证有一张答案卡:第一次(拦截时)造卡并加进当前活着的流式列表,内容用答案或占位;
     // 之后(答案就绪)再调一次,把已有卡片的文本更新为答案。
-    private fun ensureAnswerCard(dialogId: String) {
-        val s = sessionOrNull(dialogId) ?: return
-        if (!s.pendingViewAnswer) return
-        // 若 RN 卡片已存在,则由 RN 卡片承载显示,不自建/更新重复的 ToastCard
-        if (s.cardRef?.get() != null || s.bridgeRef?.get() != null) {
-            Log.i(TAG, "RN card already active for dialogId=$dialogId, skip ToastCard ensureAnswerCard")
-            return
-        }
-        val cl = targetClassLoader ?: return
-        val answer = s.aiAnswer
-
-        // 卡还在但已经被小爱摘掉了(它开新一轮对话会重置列表)→ 丢掉重造,否则更新了也没人显示
-        val known = s.answerCard?.get()
-        if (known != null && System.identityHashCode(known) in detachedCards) {
-            Log.i(TAG, "answer card was detached, rebuilding dialogId=$dialogId")
-            detachedCards.remove(System.identityHashCode(known))
-            s.answerCard = null
-            s.answerCardSink = null
-        }
-
-        // 认领来的卡到这会儿还没绑定视图 → 它永远不会绑,丢掉改走自建卡。
-        // 2026-07-20 真机:认领的 FlowTemplateToastCard 从 +0ms 到 +30s 全程 viewHolder=null,
-        // 而认领动作又占着 answerCard,把本来能工作的自建卡路径挡在门外 ——
-        // 现象就是"有语音、没卡片"。只对认领的卡这么判:自建卡刚 addCard 完还没 bind 是正常的。
-        s.answerCard?.get()?.let { c ->
-            val id = System.identityHashCode(c)
-            if (id in commandeeredCards && viewHolderOf(c) == null) {
-                Log.i(TAG, "commandeered card@$id never bound, falling back to own card dialogId=$dialogId")
-                commandeeredCards.remove(id)
-                s.answerCard = null
-                s.answerCardSink = null
-            }
-        }
-
-        // 已经有卡了 → 有答案就更新文本
-        val existing = s.answerCard?.get()
-        if (existing != null) {
-            if (answer != null) {
-                Handler(Looper.getMainLooper()).post {
-                    try {
-                        ourCardTexts[System.identityHashCode(existing)] = answer
-                        existing.javaClass.getMethod("updateCardText", String::class.java).invoke(existing, answer)
-                        forceShowToastViewHolder(existing, answer)
-                        Log.i(TAG, "answer card updated dialogId=$dialogId")
-                    } catch (t: Throwable) {
-                        Log.i(TAG, "update answer card failed dialogId=$dialogId: $t")
-                    }
-                    // 当初可能是把卡加进了兜底拿到的 FloatManager,而真正在渲染的是另一个实例
-                    // (现象:有语音没卡片)。这时观察到的 activeCardSink 才是对的,补加一次。
-                    reattachIfWrongSink(cl, dialogId, existing)
-                }
-            }
-            return
-        }
-
-        // 还没造卡 → 造一张并加进当前活跃 sink(内容:有答案用答案,没有就占位)
-        val sink = activeCardSink?.get() ?: resolveFloatManager()
-        if (sink == null) {
-            Log.i(TAG, "no active card sink yet dialogId=$dialogId")
-            return
-        }
-        Handler(Looper.getMainLooper()).post {
-            try {
-                val cardClass = cl.loadClass(symbols.flowToastCardClass)
-                val ctor = cardClass.getConstructor(Integer.TYPE, String::class.java)
-                val card = ctor.newInstance(0, answer ?: THINKING_PLACEHOLDER)
-                try {
-                    cardClass.getMethod("setDialogId", String::class.java).invoke(card, dialogId)
-                } catch (t: Throwable) { }
-                s.answerCard = WeakReference(card)
-                s.answerCardSink = WeakReference(sink)
-                // 登记这张卡该显示什么,bindView 时由 hookToastCardBind 强制填进 TextView
-                ourCardTexts[System.identityHashCode(card)] = answer ?: THINKING_PLACEHOLDER
-                val baseCardClass = cl.loadClass("com.xiaomi.voiceassistant.card.a")
-                sink.javaClass.getMethod("addCard", baseCardClass).invoke(sink, card)
-                Log.i(TAG, "answer card added via ${sink.javaClass.name}@${System.identityHashCode(sink)}" +
-                        " card@${System.identityHashCode(card)} dialogId=$dialogId (answer=${answer != null})")
-            } catch (t: Throwable) {
-                Log.i(TAG, "ensureAnswerCard add failed dialogId=$dialogId: $t")
-            }
-        }
+    private fun replyCardForSink(cl: ClassLoader, incoming: Any): Any? {
+        replyCards.keyFor(incoming)?.let { return incoming }
+        if (!replyTurns.ownsCurrent()) return null
+        if (!cl.loadClass(symbols.rnCardClass).isInstance(incoming) &&
+            !cl.loadClass(symbols.flowToastCardClass).isInstance(incoming)) return null
+        val history = runCatching { incoming.javaClass.getMethod("isHistoryCard").invoke(incoming) as? Boolean }.getOrNull()
+        if (history == true) return null
+        val id = runCatching { incoming.javaClass.getMethod("getDialogId").invoke(incoming) as? String }.getOrNull()
+            ?.takeIf { it.isNotBlank() } ?: return null
+        val key = replyTurns.attachOutput(id) ?: return null
+        if (!replyTurns.isCurrent(key)) return null
+        val position = runCatching { incoming.javaClass.getMethod("getInsertPosition").invoke(incoming) as Int }.getOrDefault(0)
+        val card = nativeReplyCard(cl, key, id, position)
+        session(id).takenOver = true
+        session(id).pendingViewAnswer = true
+        session(id).answerCard = WeakReference(card)
+        utteranceDialogs.computeIfAbsent(key) { ConcurrentHashMap.newKeySet() }.add(id)
+        return card
     }
 
-    // 答案就绪时复查:当初加卡用的 sink,和现在真正在收 addCard 的 sink 是不是同一个对象。
-    // 不是的话说明卡加进了一个不渲染的列表(小爱刚起来、activeCardSink 还没观察到时,
-    // 只能用 UiManager.getFloatManager() 兜底,拿到的可能不是当前真正在渲染的那个实例),
-    // 补加到对的那个上。相同则什么都不做,避免重复加卡。
-    private fun reattachIfWrongSink(cl: ClassLoader, dialogId: String, card: Any) {
-        try {
-            val s = sessionOrNull(dialogId) ?: return
-            val used = s.answerCardSink?.get() ?: return
-            val current = activeCardSink?.get() ?: return
-            if (used === current) return
-            Log.i(TAG, "card sink mismatch dialogId=$dialogId used@${System.identityHashCode(used)}" +
-                    " current@${System.identityHashCode(current)} -> reattaching")
-            val baseCardClass = cl.loadClass("com.xiaomi.voiceassistant.card.a")
-            current.javaClass.getMethod("addCard", baseCardClass).invoke(current, card)
-            s.answerCardSink = WeakReference(current)
-            Log.i(TAG, "card reattached dialogId=$dialogId")
-        } catch (t: Throwable) {
-            Log.i(TAG, "reattachIfWrongSink failed dialogId=$dialogId: $t")
+    private fun nativeReplyCard(cl: ClassLoader, key: String, dialogId: String, position: Int = 0): Any =
+        replyCards.getOrCreate(key) {
+            val type = cl.loadClass(symbols.flowToastCardClass)
+            val text = utteranceAnswers[key] ?: sessionOrNull(dialogId)?.aiAnswer ?: THINKING_PLACEHOLDER
+            val card = type.getConstructor(Integer.TYPE, String::class.java).newInstance(position, text)
+            type.getMethod("setDialogId", String::class.java).invoke(card, dialogId)
+            ourCardTexts[System.identityHashCode(card)] = text
+            Log.i(TAG, "[reply-ui] created key=$key card@${System.identityHashCode(card)}")
+            card
+        }
+
+    private fun ensureAnswerCard(dialogId: String) {
+        val key = replyTurns.keyFor(dialogId) ?: return
+        if (!replyTurns.isCurrent(key) || !replyTurns.ownsCurrent()) return
+        val cl = targetClassLoader ?: return
+        Handler(Looper.getMainLooper()).post {
+            if (!replyTurns.isCurrent(key)) return@post
+            try {
+                val card = nativeReplyCard(cl, key, dialogId)
+                val s = session(dialogId)
+                s.answerCard = WeakReference(card)
+                s.pendingViewAnswer = true
+                val text = s.aiAnswer ?: utteranceAnswers[key] ?: THINKING_PLACEHOLDER
+                ourCardTexts[System.identityHashCode(card)] = text
+                card.javaClass.getMethod("updateCardText", String::class.java).invoke(card, text)
+                // 卡片经过 r1 -> t0 两层路由不代表换了容器。已添加的对象不再重复 addCard。
+                if (cardSinks[card]?.get() == null) {
+                    val sink = activeCardSink?.get() ?: resolveFloatManager() ?: return@post
+                    sink.javaClass.getMethod("addCard", cl.loadClass("com.xiaomi.voiceassistant.card.a"))
+                        .invoke(sink, card)
+                    cardSinks[card] = WeakReference(sink)
+                    Log.i(TAG, "[reply-ui] added fallback key=$key card@${System.identityHashCode(card)}")
+                }
+                forceShowToastViewHolder(card, text)
+                Log.i(TAG, "[reply-ui] text updated key=$key len=${text.length}")
+            } catch (t: Throwable) { Log.w(TAG, "[reply-ui] render failed key=$key: $t") }
         }
     }
 
@@ -1285,9 +1253,7 @@ class HookEntry : IXposedHookLoadPackage {
                             // 还没被认领、但这轮确实归我们 → 就地认领。
                             // 有些话术卡不经过 jb0.vd(微信双开那句就是),只能在这兜底,
                             // 否则语音被静音泵按住了、文字却照样显示出来。
-                            if (ourCardTexts[System.identityHashCode(card)] == null) {
-                                claimToastCard(card, "", via = "bindView", onlyIfUnclaimed = true)
-                            }
+                            // bindView 也会用于历史记录；只回填已登记卡片，绝不认领未知卡片。
                             val text = ourCardTexts[System.identityHashCode(card)]
                             // 排查用(2026-07-20):无差别记一笔谁被 bind 了。
                             // 只在"是我们的卡"时才做事,于是"没有任何 toast 卡被 bind"
@@ -1449,9 +1415,8 @@ class HookEntry : IXposedHookLoadPackage {
                                     .invoke(card) as? String ?: return
                                 Log.i(TAG, "[rn] js ready dialogId=$dialogId hash=${System.identityHashCode(card)}")
                                 if (dialogId.isNotBlank()) {
-                                    val s = session(dialogId)
+                                    val s = captureRnCard(card, dialogId)
                                     s.rnJsReady = true
-                                    s.cardRef = WeakReference(card)
                                     maybeInject(dialogId)
                                 }
                             } catch (t: Throwable) {
@@ -1468,30 +1433,30 @@ class HookEntry : IXposedHookLoadPackage {
     }
 
     // 读取卡片:RN JS 侧是否已经准备好接收数据
-    private fun isRnFrontReady(dialogId: String): Boolean {
-        val s = sessionOrNull(dialogId)
-        if (s?.rnJsReady == true) return true
-        val card = s?.cardRef?.get() ?: return false
-        return try {
-            var found = false
-            var c: Class<*>? = card.javaClass
-            while (c != null && c != Any::class.java) {
-                for (f in c.declaredFields) {
-                    if (f.type == java.lang.Boolean.TYPE) {
-                        f.isAccessible = true
-                        if (f.getBoolean(card)) {
-                            found = true
-                            break
-                        }
-                    }
-                }
-                if (found) break
-                c = c.superclass
-            }
-            found
-        } catch (t: Throwable) {
-            true // 异常时乐观放行,避免卡住数据注入
+    private fun isRnFrontReady(dialogId: String): Boolean =
+        sessionOrNull(dialogId)?.rnJsReady == true
+
+    private fun captureRnCard(card: Any, dialogId: String): DialogSession {
+        val s = session(dialogId)
+        s.cardRef = WeakReference(card)
+        val key = replyTurns.attachOutput(dialogId)
+        if (key != null && replyTurns.isCurrent(key) && replyTurns.ownsCurrent()) {
+            s.takenOver = true
+            s.aiAnswer = s.aiAnswer ?: utteranceAnswers[key]
+            utteranceDialogs.computeIfAbsent(key) { ConcurrentHashMap.newKeySet() }.add(dialogId)
         }
+        // RN ready 回调可能只 flush 了 Finish，没有普通 instruction 可供捕获 bridge。
+        val bridgeType = targetClassLoader?.loadClass(symbols.bridgeClass) ?: return s
+        var type: Class<*>? = card.javaClass
+        while (type != null && type != Any::class.java) {
+            for (field in type.declaredFields) {
+                if (!bridgeType.isAssignableFrom(field.type)) continue
+                field.isAccessible = true
+                field.get(card)?.let { s.bridgeRef = WeakReference(it) }
+            }
+            type = type.superclass
+        }
+        return s
     }
 
     // TemplateReactNativeCard.onStop() 里,如果判定要清内存(getRNStatus)就会调用
@@ -1589,11 +1554,19 @@ class HookEntry : IXposedHookLoadPackage {
                     if (dialogId.isBlank() || queryText.isBlank()) return
 
                     val ctx = currentApplicationContext()
-                    val config = if (ctx != null) ConfigClient.read(ctx) else null
+                    val config = readHookConfig(ctx)
 
-                    // 换了一句话才停泵。不能按 dialogId 判 —— 同一句话小爱会派发多个 dialogId,
-                    // 那样会把 383ms 前刚为这句话起的泵又停掉。
-                    if (queryText != lastQueryText) stopMutePump()
+                    // 只有新的交互才停旧播报；同 id 的 ASR 改写保留原轮身份。
+                    val wasOurs = replyTurns.ownsCurrent()
+                    val previousKey = replyTurns.keyFor(lastDialogId)
+                    val turn = replyTurns.capture(dialogId, queryText, asr = false)
+                    if (!replyTurns.isCurrent(turn.key)) return
+                    if (previousKey != turn.key) {
+                        stopMutePump()
+                        if (wasOurs) stopOurTts()
+                        lastAsrText = ""
+                        lastAsrTime = 0L
+                    }
 
                     // 先记录最近问话 + 配置 —— 跳转拦截独立于 AI 接管开关,始终要有这份信息
                     lastQueryText = queryText
@@ -1606,7 +1579,7 @@ class HookEntry : IXposedHookLoadPackage {
                         return // 未启用 AI 接管,保持原生行为(但跳转拦截仍可生效)
                     }
                     // 白名单直通:这句命中用户自己配的正则 → 整句都不接管,原生行为原样放行。
-                    if (isAiTakeoverSkip(queryText, config)) {
+                    if (isAiTakeoverSkip(turn.text, config)) {
                         Log.i(TAG, "skip takeover (whitelist pattern matched): $queryText")
                         return
                     }
@@ -1615,9 +1588,8 @@ class HookEntry : IXposedHookLoadPackage {
                     // 绝不给小爱原生 TTS 抢跑开口的机会(避免替换前后两段声音一起播放)。
                     val s = session(dialogId)
                     s.takenOver = true
-                    if (config.speakAnswer) {
-                        startMutePump(dialogId)
-                    }
+                    replyTurns.claim(turn.key)
+                    startMutePump(dialogId)
 
                     // 是"查看类"候选 → 预标记,以便在没有 RN 卡片时通过 FlowTemplateToastCard 撑开占位。
                     if (viewBlockCandidateNow(config)) {
@@ -1643,28 +1615,7 @@ class HookEntry : IXposedHookLoadPackage {
                         s.pendingViewAnswer = true
                         Log.i(TAG, "bt-connect command, taking over: $queryText")
                     }
-                    // queryText 非 null = 这个 dialogId 已处理过。存在性即去重判据,所以用可空而非空串。
-                    if (sessionOrNull(dialogId)?.queryText != null) return
-                    session(dialogId).queryText = queryText
-
-                    // 按「一次问话」归拢:同一句话小爱可能派发多个 dialogId,不能各调各的模型
-                    val key = utteranceKeyFor(queryText)
-                    utteranceDialogs.getOrPut(key) { ConcurrentHashMap.newKeySet() }.add(dialogId)
-                    Log.i(TAG, "query captured: dialogId=$dialogId text=$queryText key=$key")
-
-                    // 这次问话的答案已经拿到了 → 直接复用,别再调一次模型
-                    val ready = utteranceAnswers[key]
-                    if (ready != null) {
-                        Log.i(TAG, "reuse answer for new dialogId=$dialogId key=$key")
-                        applyAnswer(key, dialogId, ready)
-                        return
-                    }
-                    // 已经有一次调用在飞了 → 等它回来统一分发
-                    if (!utteranceCalling.add(key)) {
-                        Log.i(TAG, "AI call already in flight, dialogId=$dialogId joins key=$key")
-                        return
-                    }
-                    startAiCall(key, queryText, config)
+                    startTrackedCall(turn.key, dialogId, turn.text, config)
                 } catch (t: Throwable) {
                     Log.i(TAG, "hookOperationManager error: $t")
                 }
@@ -1690,6 +1641,9 @@ class HookEntry : IXposedHookLoadPackage {
                                 try {
                                     val card = param.thisObject
                                     if (name in listOf("onCardInvisible", "onCardDetached", "onCardRemoved", "onDestroy")) {
+                                        val id = card.javaClass.getMethod("getDialogId").invoke(card) as? String
+                                        if (id == null || !replyTurns.isCurrentDialog(id)) return
+                                        if (replyTurns.keyFor(id)?.let { replyCards.get(it) } != null) return
                                         Log.i(TAG, "[rn] card exit/invisible ($name), stopping TTS")
                                         stopOurTts()
                                         return
@@ -1697,8 +1651,8 @@ class HookEntry : IXposedHookLoadPackage {
                                     val getDialogId = card.javaClass.getMethod("getDialogId")
                                     val dialogId = getDialogId.invoke(card) as? String ?: return
                                     if (dialogId.isNotBlank()) {
-                                        session(dialogId).cardRef = WeakReference(card)
-                                        maybeForceShow(dialogId)
+                                        captureRnCard(card, dialogId)
+                                        maybeInject(dialogId)
                                     }
                                 } catch (t: Throwable) {
                                     // getDialogId 可能暂时拿不到,忽略
@@ -1738,17 +1692,23 @@ class HookEntry : IXposedHookLoadPackage {
                     val type = param.args[0] as? String ?: return
                     val content = (param.args[1] as? String).orEmpty()
                     val dialogId = extractDialogId(content) ?: lastDialogId
+                    val key = replyTurns.attachOutput(dialogId)
+                    if (key != null && !replyTurns.isCurrent(key)) {
+                        // 旧轮的迟到输出不能显示到当前页面。
+                        if (isOurs(dialogId)) param.result = null
+                        return
+                    }
+                    if (key != null && replyTurns.ownsCurrent()) {
+                        val s = session(dialogId)
+                        s.takenOver = true
+                        s.aiAnswer = s.aiAnswer ?: utteranceAnswers[key]
+                        utteranceDialogs.computeIfAbsent(key) { ConcurrentHashMap.newKeySet() }.add(dialogId)
+                    }
 
                     // "Finish" / "cancel" 这类控制信令的 content 是空的,里面没有 dialog_id。
                     // 只要还有接管中、尚未注入完成的对话或静音泵在运行,就先把这些控制信令拦下来,
                     // 避免前端提前关闭流导致我们后续的 sendStreamData 无法上屏。
-                    if (type == "Finish" || type == "cancel") {
-                        if (sessions.values.any { it.takenOver && !it.injected.get() } || isMutePumpActive()) {
-                            Log.i(TAG, "suppress control signal type=$type (takeover pending)")
-                            param.result = null
-                        }
-                        return
-                    }
+                    if (type == "Finish" || type == "cancel") return
 
                     if (dialogId.isNotBlank()) {
                         session(dialogId).bridgeRef = WeakReference(param.thisObject)
@@ -1766,13 +1726,6 @@ class HookEntry : IXposedHookLoadPackage {
                         } else {
                             Log.i(TAG, "no ToastStream found, pass through dialogId=$dialogId")
                         }
-                        if (dialogId.isNotBlank()) {
-                            maybeInject(dialogId)
-                        }
-                    } else if (takenOverNow) {
-                        // 非 instruction 类型(比如语音相关的其它 type)一律拦掉
-                        Log.i(TAG, "suppress non-instruction type=$type dialogId=$dialogId")
-                        param.result = null
                     }
                 } catch (t: Throwable) {
                     Log.i(TAG, "hookBridge error: $t")
@@ -1809,31 +1762,6 @@ class HookEntry : IXposedHookLoadPackage {
         return content
     }
 
-    // 强制把卡片显示出来,不管小爱自己内部判不判定要展示(应对 simply-speak 类快速回答不出卡片的情况)。
-    // onCardVisible 是通用基类方法,RN 卡片实际渲染是否存活看的是 onResume/onStop
-    // (内部会调用 RN delegate 的 onResume/onPause),两个都调一下,确保 RN 侧没被暂停。
-    private fun maybeForceShow(dialogId: String) {
-        val s = sessionOrNull(dialogId) ?: return
-        if (!s.takenOver) return
-        val card = s.cardRef?.get() ?: return
-        Handler(Looper.getMainLooper()).post {
-            try {
-                val m = card.javaClass.getMethod("onCardVisible")
-                m.invoke(card)
-                Log.i(TAG, "forced onCardVisible dialogId=$dialogId")
-            } catch (t: Throwable) {
-                Log.i(TAG, "forceShow failed dialogId=$dialogId: $t")
-            }
-            try {
-                val m = card.javaClass.getMethod("onResume")
-                m.invoke(card)
-                Log.i(TAG, "forced onResume dialogId=$dialogId")
-            } catch (t: Throwable) {
-                Log.i(TAG, "forceResume failed dialogId=$dialogId: $t")
-            }
-        }
-    }
-
     // 开启静音泵:在 windowMs 内每 250ms 掐一次主音轨。
     // 早先的做法是拦截当下打 0/350/900/1600ms 四发定时补刀,但小爱的答案是云端流式回来的,
     // 起播时刻不确定,超过 1.6s 才开口就完全漏掉 —— 现象就是"替换过的和没替换过的一起放"。
@@ -1865,7 +1793,7 @@ class HookEntry : IXposedHookLoadPackage {
 
     // 泵是否正在为当前这次交互运行。等价于"这轮我们接管了,小爱该闭嘴"。
     private fun isMutePumpActive(): Boolean =
-        mutePumpUntil > System.currentTimeMillis()
+        replyTurns.ownsCurrent() || mutePumpUntil > System.currentTimeMillis()
 
     // 停泵:新一轮提问时调用,别把下一次交互的正常播报也掐了
     private fun stopMutePump() {
@@ -1878,6 +1806,7 @@ class HookEntry : IXposedHookLoadPackage {
     // 主路径 n1.speakTts 播在 TOAST_STREAM_TTS 音轨上,和静音泵掐的主音轨互不干扰,
     // 所以泵可以一直跑着,不用为了让我们开口而放开对小爱的钳制。
     private fun speakAnswer(key: String, answer: String) {
+        if (!replyTurns.isCurrent(key)) return
         val cfg = lastConfig ?: return
         if (!cfg.enabled || !cfg.speakAnswer) return
         // 只念我们真正接管了的对话 —— 没拦下小爱的话,它自己已经在说了,再念就是两个人抢话。
@@ -1902,6 +1831,7 @@ class HookEntry : IXposedHookLoadPackage {
         }
         val cl = targetClassLoader ?: return
         Handler(Looper.getMainLooper()).post {
+            if (!replyTurns.isCurrent(key)) return@post
             // 先掐掉小爱可能还在念的兜底话术,再开口,避免两句话叠在一起
             muteAudio()
             // 不管念得成不成,都要把 b2 换成我们的文本:否则用户点卡片右下角喇叭
@@ -1911,15 +1841,8 @@ class HookEntry : IXposedHookLoadPackage {
                 Log.i(TAG, "spoke answer via n1 dialogId=$dialogId len=${speakable.length}")
                 return@post
             }
-            // 兜底路径 u1.speak 播的是**主音轨** —— 正是静音泵一直在掐的那条。
-            // 不先停泵的话我们自己刚开口就被自己掐掉。代价是小爱要是这时也在说话就盖不住了,
-            // 但总比我们完全不出声强。
-            stopMutePump()
-            if (speakViaEngine(cl, speakable)) {
-                Log.i(TAG, "spoke answer via u1 (mute pump released) dialogId=$dialogId len=${speakable.length}")
-                return@post
-            }
-            Log.i(TAG, "both TTS paths failed key=$key dialogId=$dialogId")
+            // 主引擎可能已销毁且 speak() 会静默返回；释放拦截还会让原生回答重新开口。
+            Log.w(TAG, "Toast TTS unavailable; answer remains on card key=$key dialogId=$dialogId")
             spokenUtterances.remove(key)
         }
     }
@@ -1930,6 +1853,7 @@ class HookEntry : IXposedHookLoadPackage {
     // 之后 addFragment 就会重建缓冲区。
     private fun syncSpeakContent(cl: ClassLoader, dialogId: String, text: String) {
         try {
+            injectingNow.set(true)
             val clazz = cl.loadClass(symbols.speakContentClass)
             val instance = kotlinObjectInstance(clazz) ?: return
             clazz.getMethod("clean").invoke(instance)
@@ -1938,7 +1862,78 @@ class HookEntry : IXposedHookLoadPackage {
             Log.i(TAG, "speak content synced dialogId=$dialogId")
         } catch (t: Throwable) {
             Log.i(TAG, "syncSpeakContent failed dialogId=$dialogId: $t")
+        } finally {
+            injectingNow.set(false)
         }
+    }
+
+    /** 在宿主入队/写 PCM 前截断，静音泵只负责清理接管前已排队的声音。 */
+    private fun hookNativeAudio(cl: ClassLoader) {
+        try {
+            val clazz = cl.loadClass(symbols.audioTrackManagerClass)
+            val getTrack = clazz.getMethod("getAudioTrackByName", String::class.java)
+            val methods = clazz.declaredMethods.filter {
+                it.name in setOf("startPlay", "startGroupPlay", "resumePlay", "put") &&
+                    !java.lang.reflect.Modifier.isStatic(it.modifiers) && it.returnType == Void.TYPE
+            }
+            for (method in methods) {
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!isMutePumpActive()) return
+                        try {
+                            if (param.thisObject === getTrack.invoke(null, OUR_AUDIO_TRACK)) return
+                            param.result = null
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "native audio guard failed: $t")
+                        }
+                    }
+                })
+            }
+            Log.i(TAG, "hooked native audio gate ${clazz.name}: ${methods.size} methods")
+        } catch (t: Throwable) {
+            Log.w(TAG, "native audio gate unavailable; using mute pump: $t")
+        }
+    }
+
+    /** 新版 configCardPressMenu 的 speakText 会启动另一条 StreamingTextTts 音轨。 */
+    private fun hookAuthoritativeText(cl: ClassLoader) {
+        try {
+            XposedHelpers.findAndHookMethod(cl.loadClass(symbols.rnCardClass),
+                "configCardPressMenu", JSONObject::class.java, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        try {
+                            val id = param.thisObject.javaClass.getMethod("getDialogId")
+                                .invoke(param.thisObject) as? String ?: return
+                            if (!isOurs(id) || !replyTurns.isCurrentDialog(id)) return
+                            val answer = sessionOrNull(id)?.aiAnswer.orEmpty()
+                            val json = JSONObject((param.args[0] as? JSONObject ?: JSONObject()).toString())
+                            json.put("totalText", answer)
+                            // 模块统一在最终答案就绪后播报，避免 RN 再启动一次流式合成。
+                            json.put("speakText", "")
+                            json.put("isLlmContentDisplayComplete", answer.isNotBlank())
+                            json.put("isIllegalContent", false)
+                            param.args[0] = json
+                        } catch (t: Throwable) { Log.w(TAG, "press menu text guard failed: $t") }
+                    }
+                })
+        } catch (t: Throwable) { Log.w(TAG, "press menu guard unavailable: $t") }
+        try {
+            XposedHelpers.findAndHookMethod(cl.loadClass(symbols.speakContentClass),
+                "addFragment", String::class.java, String::class.java, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (injectingNow.get() == true) return
+                        val id = param.args[0] as? String ?: return
+                        if (isOurs(id) && replyTurns.isCurrentDialog(id)) param.result = null
+                    }
+                })
+        } catch (t: Throwable) { Log.w(TAG, "speak content guard unavailable: $t") }
+    }
+
+    private fun readHookConfig(ctx: Context?): AiConfig? {
+        val config = ctx?.let { ConfigClient.readOrNull(it) }
+        if (config != null) lastConfig = config
+        else Log.w(TAG, "config provider unavailable; reuse last successful configuration")
+        return config ?: lastConfig
     }
 
     // 当用户返回桌面、关闭浮窗或卡片被移出屏幕时,立即终止 TTS 播报(对齐小爱原生行为)
@@ -2013,19 +2008,6 @@ class HookEntry : IXposedHookLoadPackage {
         }
         Log.i(TAG, "no singleton instance found for ${clazz.name}")
         return null
-    }
-
-    // 兜底:小爱念本地答案那条路。引擎(u1.f56104f)为 null 时它会静默丢弃,所以只当备选。
-    private fun speakViaEngine(cl: ClassLoader, text: String): Boolean {
-        return try {
-            val clazz = cl.loadClass(symbols.ttsBridgeClass)
-            val instance = clazz.getMethod("getInstance").invoke(null) ?: return false
-            clazz.getMethod("speak", String::class.java).invoke(instance, text)
-            true
-        } catch (t: Throwable) {
-            Log.i(TAG, "speakViaEngine failed: $t")
-            false
-        }
     }
 
     // 把 markdown 答案压成适合朗读的纯文本。
@@ -2123,19 +2105,6 @@ class HookEntry : IXposedHookLoadPackage {
         return m?.groupValues?.get(1)
     }
 
-    // 同一句问话在时间窗内复用同一个 key;超窗就算新的一次交互。
-    private fun utteranceKeyFor(text: String): String {
-        val now = System.currentTimeMillis()
-        val prev = utteranceLastSeen[text]
-        if (prev != null && now - prev.second < UTTERANCE_WINDOW_MS) {
-            utteranceLastSeen[text] = prev.first to now
-            return prev.first
-        }
-        val key = "$text#$now"
-        utteranceLastSeen[text] = key to now
-        return key
-    }
-
     // ── 流式显示 ──────────────────────────────────────────────────────────────
     // 只驱动「显示」:把模型正文的增量推到这次问话名下已存在的答案卡,做打字机效果。
     // TTS 不受影响,仍是拿到全文后整串播(speakAnswer)。当前没有卡片就静默丢弃 ——
@@ -2163,24 +2132,36 @@ class HookEntry : IXposedHookLoadPackage {
 
     // 把文本推到这次问话名下所有活着的答案卡(自建卡 + 认领来的话术卡都算)。best-effort。
     private fun pushStreamingText(key: String, text: String) {
-        for (id in utteranceDialogs[key].orEmpty()) {
-            val s = sessionOrNull(id) ?: continue
-            if (s.cardRef?.get() != null) continue // 由 RN 卡片流式处理,避免 ToastCard 重复显示
-            val card = s.answerCard?.get() ?: continue
-            // 登记好该显示什么,bindView 会据此强制回填,和流式保持一致。
-            ourCardTexts[System.identityHashCode(card)] = text
-            Handler(Looper.getMainLooper()).post {
-                try {
-                    card.javaClass.getMethod("updateCardText", String::class.java).invoke(card, text)
-                    forceShowToastViewHolder(card, text)
-                } catch (t: Throwable) {
-                    // 卡片类型不支持 updateCardText 之类 —— 丢掉即可,最终答案有兜底路径。
-                }
-            }
+        if (!replyTurns.isCurrent(key)) return
+        val card = replyCards.get(key) ?: return
+        Handler(Looper.getMainLooper()).post {
+            if (!replyTurns.isCurrent(key)) return@post
+            try {
+                ourCardTexts[System.identityHashCode(card)] = text
+                card.javaClass.getMethod("updateCardText", String::class.java).invoke(card, text)
+                forceShowToastViewHolder(card, text)
+            } catch (t: Throwable) { Log.w(TAG, "[reply-ui] streaming update failed: $t") }
         }
     }
 
     // 一次问话只调一次模型;答案回来后分发给这次问话名下的所有 dialogId。
+    private fun startTrackedCall(key: String, dialogId: String, queryText: String, config: AiConfig) {
+        if (!replyTurns.isCurrent(key)) return
+        val s = session(dialogId)
+        utteranceDialogs.computeIfAbsent(key) { ConcurrentHashMap.newKeySet() }.add(dialogId)
+        val firstCapture = synchronized(s) {
+            if (s.queryText != null) false else { s.queryText = queryText; true }
+        }
+        // ASR 和 setQueryInfo 两条入口共用一把请求闸，网络失败后的同轮回调也不自动重发。
+        if (!firstCapture) return
+        val ready = utteranceAnswers[key]
+        if (ready != null) {
+            applyAnswer(key, dialogId, ready)
+            return
+        }
+        if (replyTurns.tryStart(key)) startAiCall(key, queryText, config)
+    }
+
     private fun startAiCall(key: String, queryText: String, config: AiConfig) {
         Thread {
             try {
@@ -2206,9 +2187,9 @@ class HookEntry : IXposedHookLoadPackage {
                 val answer = AiClient.chat(
                     config, queryText, currentApplicationContext(), history, streamSinkFor(key)
                 ) {
-                    val ours = utteranceDialogs[key].orEmpty().any { isOurs(it) }
-                    ours || isMutePumpActive()
+                    replyTurns.isCurrent(key) && utteranceDialogs[key].orEmpty().any { isOurs(it) }
                 }
+                if (!replyTurns.isCurrent(key)) return@Thread
                 Log.i(TAG, "AI answer ready key=$key: $answer")
                 // 软失败([AiClient.FAILED_ANSWER])要当失败处理,不能缓存也不能记历史。
                 // 它是**正常返回**的字符串,不像硬失败会抛异常走下面的 catch,所以得显式认。
@@ -2219,7 +2200,7 @@ class HookEntry : IXposedHookLoadPackage {
                 if (!failed) {
                     utteranceAnswers[key] = answer
                     // 答成了才记进历史 —— 失败的轮次不该污染后面的上下文。
-                    // 一次问话只走到这里一次(utteranceCalling 挡住了并发,答案命中
+                    // 一次问话只走到这里一次(ReplyTurns.tryStart 挡住了并发,答案命中
                     // utteranceAnswers 缓存的重复提问根本不会再调 startAiCall),所以不会重复记。
                     if (config.contextEnabled) ChatHistory.record(queryText, answer)
                 }
@@ -2231,8 +2212,10 @@ class HookEntry : IXposedHookLoadPackage {
                 speakAnswer(key, answer)
             } catch (t: Throwable) {
                 Log.i(TAG, "AI call failed key=$key: $t")
-            } finally {
-                utteranceCalling.remove(key)
+                if (replyTurns.isCurrent(key)) {
+                    for (id in utteranceDialogs[key].orEmpty()) applyAnswer(key, id, AiClient.FAILED_ANSWER)
+                    speakAnswer(key, AiClient.FAILED_ANSWER)
+                }
             }
         }.start()
     }
@@ -2240,11 +2223,12 @@ class HookEntry : IXposedHookLoadPackage {
     // 把答案落到某个具体 dialogId 上:注入 RN、更新卡片、写历史。
     // 播报不在这里 —— 那是按 key 的,否则同一句话有几个 dialogId 就念几遍。
     private fun applyAnswer(key: String, dialogId: String, answer: String) {
+        if (!replyTurns.isCurrent(key)) return
         try {
             session(dialogId).aiAnswer = answer
-            maybeInject(dialogId)
-            // 查看类被拦的对话:答案就绪后更新(或补建)答案卡
-            if (sessionOrNull(dialogId)?.pendingViewAnswer == true) ensureAnswerCard(dialogId)
+            targetClassLoader?.let { syncSpeakContent(it, dialogId, toSpeakable(answer)) }
+            // 替换回答统一由原生文字卡显示，RN 的计算器/业务页面不承担聊天文字渲染。
+            ensureAnswerCard(dialogId)
             // 历史库同步换成我们的答案,否则回 App 看历史还是那句兜底话术
             writeAnswerToHistory(dialogId, answer)
         } catch (t: Throwable) {
@@ -2254,12 +2238,15 @@ class HookEntry : IXposedHookLoadPackage {
 
     // AI 回复 + bridge 实例都齐了才注入,只注入一次
     private fun maybeInject(dialogId: String) {
+        val key = replyTurns.keyFor(dialogId) ?: return
+        if (!replyTurns.isCurrent(key)) return
+        if (replyCards.get(key) != null) return // 已由原生文字卡承载，不再开第二条显示通道
         val s = sessionOrNull(dialogId) ?: return
         if (s.injected.get()) return
         val answer = s.aiAnswer ?: return   // 答案还没到,正常路过,不值得记
         // 下面两个缺一样都等于"这轮永远不会上屏"。原先是静默 return,
         // 于是"卡片一直空白"在日志里和"根本没走到这"长得一模一样,只能靠猜。
-        val bridge = s.bridgeRef?.get() ?: sessionOrNull(lastDialogId)?.bridgeRef?.get()
+        val bridge = s.bridgeRef?.get()
         if (bridge == null) {
             Log.i(TAG, "no bridge for dialogId=$dialogId (last=$lastDialogId), cannot inject")
             return
@@ -2272,7 +2259,9 @@ class HookEntry : IXposedHookLoadPackage {
 
         // RN 的 JS 侧还没 ready 的话,现在发过去等于石沉大海。
         // 先不标记 injected,等 rnStartReceiveInstruction 回调时会再调一次这里。
-        val ready = isRnFrontReady(dialogId) || isRnFrontReady(lastDialogId)
+        val ready = isRnFrontReady(dialogId) || sessions.entries.any { (id, other) ->
+            replyTurns.keyFor(id) == key && other.rnJsReady && other.bridgeRef?.get() === bridge
+        }
         if (ready == false) {
             Log.i(TAG, "RN front not ready yet, defer inject dialogId=$dialogId")
             return
@@ -2282,6 +2271,11 @@ class HookEntry : IXposedHookLoadPackage {
         if (!s.injected.compareAndSet(false, true)) return   // 只注入一次(原来靠 Set.add 返回值)
 
         Handler(Looper.getMainLooper()).post {
+            if (!replyTurns.isCurrent(key)) {
+                s.injected.set(false)
+                return@post
+            }
+            if (injectedBridges[bridge] == key) return@post
             // 兜底:万一 RN 实例在这之前已经被 onStop/onPause 掉了,注入前再唤醒一次
             try {
                 val card = s.cardRef?.get()
@@ -2320,6 +2314,9 @@ class HookEntry : IXposedHookLoadPackage {
 
                 val finalPayload = JSONObject().apply {
                     put("header", JSONObject().apply {
+                        put("name", "ToastStream")
+                        put("namespace", "Template")
+                        put("transaction_id", transactionId)
                         put("id", UUID.randomUUID().toString())
                         put("dialog_id", dialogId)
                     })
@@ -2327,6 +2324,7 @@ class HookEntry : IXposedHookLoadPackage {
                 }
                 method.invoke(bridge, "instruction", finalPayload.toString())
                 method.invoke(bridge, "Finish", "")
+                injectedBridges[bridge] = key
                 Log.i(TAG, "closed xiaoai stream (<FINAL>+Finish) dialogId=$dialogId")
             } catch (t: Throwable) {
                 Log.i(TAG, "stream close failed dialogId=$dialogId: $t")
@@ -2342,9 +2340,7 @@ class HookEntry : IXposedHookLoadPackage {
             try {
                 val card = s.cardRef?.get()
                 if (card != null) {
-                    val targetMethod = card.javaClass.declaredMethods.firstOrNull { m ->
-                        m.parameterTypes.size == 1 && m.parameterTypes[0] == JSONObject::class.java
-                    }
+                    val targetMethod = card.javaClass.getMethod("configCardPressMenu", JSONObject::class.java)
                     if (targetMethod != null) {
                         targetMethod.isAccessible = true
                         val plain = answer.replace("**", "").replace("`", "")

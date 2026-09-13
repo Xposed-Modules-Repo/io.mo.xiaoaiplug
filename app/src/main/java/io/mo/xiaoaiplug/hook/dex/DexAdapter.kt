@@ -8,6 +8,7 @@ import java.io.File
 
 private const val TAG = "XiaoAiProbe.Dex"
 private const val CACHE_FILE_NAME = "xiaoai_plug_symbols_cache.json"
+private const val SYMBOL_SCHEMA_VERSION = 2
 
 /**
  * 负责 DexKit 动态扫描生命周期、版本更新感知与本地缓存管理。
@@ -180,6 +181,7 @@ object DexAdapter {
         return try {
             val text = file.readText()
             val json = JSONObject(text)
+            if (json.optInt("schemaVersion", 0) != SYMBOL_SCHEMA_VERSION) return null
 
             val cachedVersion = json.optLong("appVersionCode", -1L)
             val cachedLastModified = json.optLong("apkLastModified", -1L)
@@ -222,6 +224,7 @@ object DexAdapter {
     ) {
         try {
             val root = JSONObject().apply {
+                put("schemaVersion", SYMBOL_SCHEMA_VERSION)
                 put("appVersionCode", appVersionCode)
                 put("apkLastModified", apkLastModified)
                 put("apkLength", apkLength)
@@ -236,4 +239,3 @@ object DexAdapter {
         }
     }
 }
-

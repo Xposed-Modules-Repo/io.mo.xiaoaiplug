@@ -148,14 +148,13 @@ object DexFingerprints {
             }
         }.onFailure { Log.w(TAG, "Fingerprint scan agentActionClass failed", it) }
 
-        // 7. ToastOperation 话术卡 (原 jb0.vd, 新版 c41.y1)
-        // 特征: 内部引用 "fakeDialogId" 或 "fakeErrorDialogId"
+        // fakeDialogId 在很多不相关类中出现，必须用操作器自身的日志标识。
         runCatching {
             val toastOpClass = bridge.findClass(
                 FindClass.create().matcher(
-                    ClassMatcher.create().addUsingString("fakeDialogId")
+                    ClassMatcher.create().addUsingString("TemplateToastOperation")
                 )
-            ).firstOrNull()
+            ).singleOrNull { !it.name.contains("$") }
             if (toastOpClass != null) {
                 resolved.toastOperationClass = toastOpClass.name
                 Log.i(TAG, "Fingerprint matched toastOperationClass: ${resolved.toastOperationClass}")
@@ -230,11 +229,6 @@ object DexFingerprints {
                         .addMethod(MethodMatcher.create().name("recordToSpeak"))
                 )
             ).firstOrNull { !it.name.contains("$") }
-                ?: bridge.findClass(
-                    FindClass.create().matcher(
-                        ClassMatcher.create().addUsingString("CHAT_MESSAGE_BEAN")
-                    )
-                ).firstOrNull { !it.name.contains("$") && !it.name.endsWith("Dao") }
             if (chatDbClass != null) {
                 resolved.chatDbManagerClass = chatDbClass.name
                 Log.i(TAG, "Fingerprint matched chatDbManagerClass: ${resolved.chatDbManagerClass}")
@@ -247,6 +241,7 @@ object DexFingerprints {
             val flowCardClass = bridge.findClass(
                 FindClass.create().matcher(
                     ClassMatcher.create()
+                        .addUsingString("FlowTemplateToastCard")
                         .addMethod(
                             MethodMatcher.create()
                                 .name("updateCardText")
@@ -260,7 +255,17 @@ object DexFingerprints {
             }
         }.onFailure { Log.w(TAG, "Fingerprint scan flowToastCardClass failed", it) }
 
+        // 13. 新版结果分发器与浮窗容器，不能沿用旧版本的混淆类名。
+        runCatching {
+            bridge.findClass(FindClass.create().matcher(
+                ClassMatcher.create().addUsingString("ResultCardManagerController")
+                    .addMethod(MethodMatcher.create().name("addCard")
+                        .addParamType("com.xiaomi.voiceassistant.card.a"))
+            )).singleOrNull { !it.name.contains("$") }?.let {
+                resolved.flowControllerClass = it.name
+            }
+        }.onFailure { Log.w(TAG, "Fingerprint scan flowControllerClass failed", it) }
+
         return resolved
     }
 }
-
