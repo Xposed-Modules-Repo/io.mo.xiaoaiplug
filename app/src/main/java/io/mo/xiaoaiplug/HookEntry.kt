@@ -11,6 +11,7 @@ import io.mo.xiaoaiplug.config.ConfigClient
 import io.mo.xiaoaiplug.hook.SettingsHook
 import io.mo.xiaoaiplug.hook.ReplyTurns
 import io.mo.xiaoaiplug.hook.ReplyCards
+import io.mo.xiaoaiplug.hook.NativeActionPolicy
 import io.mo.xiaoaiplug.hook.dex.DexAdapter
 import io.mo.xiaoaiplug.hook.dex.TargetSymbols
 import de.robv.android.xposed.IXposedHookLoadPackage
@@ -366,9 +367,8 @@ class HookEntry : IXposedHookLoadPackage {
         hookBackgroundAppsNav(cl)
     }
 
-    // 「查看类」不跳转:拦截 IntentUtilsWrapper 的所有跳转与隐藏卡片入口。
-    // 当最近一次问话是"查看/查询/多少…"类、且没有放行词时,在小爱收回对话框前直接拦截,
-    // 保持浮窗卡片展开并转由 AI 接管回答。
+    // 拦截已接管轮次的原版跳转，以及独立设置要求拦截的查看类跳转。
+    // 只 hook 小爱的工具封装，不 hook Context.startActivity，模块 launch_app 可正常执行。
     private fun hookSettingsJump(cl: ClassLoader) {
         val clazz = try {
             cl.loadClass(symbols.intentUtilsWrapperClass)
@@ -397,7 +397,7 @@ class HookEntry : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         try {
                             if (!ownsCurrentTurn()) return
-                            Log.i(TAG, "block view-jump via IntentUtilsWrapper.${m.name}: query=\"$lastQueryText\"")
+                            Log.i(TAG, "block native action via IntentUtilsWrapper.${m.name}: query=\"$lastQueryText\"")
                             param.result = when (m.returnType) {
                                 java.lang.Boolean.TYPE -> true
                                 Integer.TYPE -> 0
@@ -780,34 +780,15 @@ class HookEntry : IXposedHookLoadPackage {
         return hasVerb && hasAnchor
     }
 
-    /**
-     * 这一轮交互归不归我们 —— 所有"要不要拦"的判定都问这一个问题。
-     *
-     * **刻意不看跳转目标是哪个 App。** 早先的做法是"问话是查看类 **且** 目标在
-     * SETTINGS_PACKAGES 白名单里"才拦,那个白名单是个填不完的坑:实测"查看系统版本"
-     * 跳的是 com.android.updater(「系统更新」是独立 app,不在设置里),不在名单里就漏了;
-     * 而且它的失败是静默的 —— 跳转照常发生,日志里没有任何异常,只能靠真机复现才发现。
-     *
-     * 真正的判据在更上游:setQueryInfo 那一刻(比跳转早约 300ms)如果判定这句是查看类,
-     * 就已经 pendingViewAnswer.add + 起静音泵 + 调模型了,"这轮我们自己答"是既成事实。
-     * 此时小爱还要起 Activity,错不在"目标像不像设置",而在这轮已经不归它了 ——
-     * 跳 App 是它回答问题的方式,而它的答案已经被我们抢走。
-     *
-     * 所以目标是什么包根本不重要,判据只剩:用户是在**问问题**(而不是让"打开"什么),
-     * 且这次跳转和那句问话属于同一次交互。
-     */
+    /** 动作与回答共用 ASR/setQueryInfo 的接管状态，不能再仅凭查看词或杀后台词判断。 */
     private fun ownsCurrentTurn(): Boolean {
         val cfg = lastConfig ?: return false
-        // 问话要足够新(和这次跳转是同一次交互);太旧就不管,避免误伤后续手动/其它跳转
-        if (System.currentTimeMillis() - lastQueryTime > 12_000L) return false
-        if (viewBlockCandidateNow(cfg)) return true
-        // 杀后台类:我们已经接管这轮的 force-stop/kill,小爱原生那个"清理最近任务"动作
-        // (会先放一段系统清后台动画)就不该再放出来 —— 否则先播清理动画、我们再杀,
-        // 观感是两边各干各的。这条原生动作和查看类的跳转走的是同几个收口(AgentAction /
-        // IntentLaunch / startActivitySafely),所以在这里一并认领即可,不用新挂 hook。
-        // 只在 AI 接管开启时拦:关了我们不杀,得让小爱原生清后台照常。
-        if (cfg.enabled && killBackgroundCommandNow()) return true
-        return false
+        return NativeActionPolicy.shouldBlock(
+            queryAgeMs = System.currentTimeMillis() - lastQueryTime,
+            takenOver = cfg.enabled && cfg.isUsable && replyTurns.ownsCurrent(),
+            skipTakeover = currentQueryTexts().any { isAiTakeoverSkip(it, cfg) },
+            blockViewJump = viewBlockCandidateNow(cfg)
+        )
     }
 
     /**
@@ -891,8 +872,8 @@ class HookEntry : IXposedHookLoadPackage {
                     try {
                         val intent = param.args[0] as? android.content.Intent ?: return
                         val srcUri = (param.args[1] as? String).orEmpty()
-                        if (!shouldBlockWebSearch(intent, srcUri)) return
-                        Log.i(TAG, "block web-search fallback: query=\"$lastQueryText\" intent=$intent srcUri=$srcUri")
+                        if (!ownsCurrentTurn() && !shouldBlockWebSearch(intent, srcUri)) return
+                        Log.i(TAG, "block native intent/fallback: query=\"$lastQueryText\" intent=$intent srcUri=$srcUri")
                         param.result = 0   // 0 = 启动成功,别让上层判定失败
                         onViewJumpBlocked(lastDialogId)
                     } catch (t: Throwable) {
@@ -1044,6 +1025,7 @@ class HookEntry : IXposedHookLoadPackage {
         if (!cfg.blockWebSearch) return false
         // 只有开了 AI 接管才拦 —— 否则拦掉又没人回答,用户就什么都得不到了
         if (!cfg.enabled || !cfg.isUsable) return false
+        if (currentQueryTexts().any { isAiTakeoverSkip(it, cfg) }) return false
         // 问话要足够新,和这次跳转属于同一次交互
         if (System.currentTimeMillis() - lastQueryTime > 12_000L) return false
         if (lastQueryText.isBlank()) return false
