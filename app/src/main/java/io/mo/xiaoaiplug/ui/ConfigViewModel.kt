@@ -71,84 +71,38 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
         _showDexDialog.value = false
     }
 
-    /**
-     * 手动触发清除缓存并重新通过 DexKit 扫描分析小爱符号。
-     */
+    /** Scan in the module and publish a validated result for the host's next startup. */
     fun rescanDexSymbols() {
         if (_isScanningDex.value) return
+        _isScanningDex.value = true
         viewModelScope.launch {
-            _isScanningDex.value = true
-            val success = withContext(Dispatchers.IO) {
-                try {
+            try {
+                val message = withContext(Dispatchers.IO) {
                     val app = getApplication<Application>()
-                    val pm = app.packageManager
-                    val appInfo = try {
-                        pm.getPackageInfo("com.miui.voiceassist", 0).applicationInfo
-                    } catch (t: Throwable) {
-                        try {
-                            @Suppress("DEPRECATION")
-                            pm.getApplicationInfo("com.miui.voiceassist", 0)
-                        } catch (t2: Throwable) {
-                            null
-                        }
-                    }
-
-                    val apkPath = appInfo?.sourceDir ?: appInfo?.publicSourceDir
-
-                    if (apkPath.isNullOrBlank() || !java.io.File(apkPath).exists()) {
-                        android.util.Log.w("XiaoAiProbe", "Cannot find XiaoAi base.apk for manual rescan")
-                        return@withContext false
-                    }
-
-                    val apkFile = java.io.File(apkPath)
-                    val apkLastModified = apkFile.lastModified()
-                    val apkLength = apkFile.length()
-                    val pi = try { pm.getPackageInfo("com.miui.voiceassist", 0) } catch (t: Throwable) { null }
-                    val appVer = if (pi != null) {
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                            "v${pi.longVersionCode}"
-                        } else {
-                            @Suppress("DEPRECATION")
-                            "v${pi.versionCode}"
-                        }
-                    } else ""
-
-                    // 清理本地与内存缓存并强制重新执行 DexKit 搜索
-                    val scannedSymbols = io.mo.xiaoaiplug.hook.dex.DexAdapter.forceRescan(
-                        apkPath = apkPath,
-                        cacheDir = app.cacheDir,
-                        appVersionCode = 0L,
-                        apkLastModified = apkLastModified,
-                        apkLength = apkLength
+                    val pi = app.packageManager.getPackageInfo("com.miui.voiceassist", 0)
+                    val apkPath = pi.applicationInfo?.sourceDir
+                        ?: return@withContext "未找到小爱 APK"
+                    val result = io.mo.xiaoaiplug.hook.dex.DexAdapter.forceRescan(
+                        apkPath, app.cacheDir, pi.longVersionCode
                     )
-
-                    // 上报更新至 ConfigProvider
-                    io.mo.xiaoaiplug.config.ConfigClient.reportDexSymbols(
-                        context = app,
-                        symbolsJson = scannedSymbols.toJson().toString(),
-                        durationMs = io.mo.xiaoaiplug.hook.dex.DexAdapter.lastDurationMs,
-                        source = "手动重搜 (DexKit)",
-                        appVersion = appVer
+                    val reported = io.mo.xiaoaiplug.config.ConfigClient.reportDexSymbols(
+                        app, result, "v${pi.longVersionCode}", manual = true
                     )
-
-                    // 尝试清理小爱内部私有目录缓存
-                    runCatching {
-                        io.mo.xiaoaiplug.hook.dex.DexAdapter.clearCache(java.io.File("/data/data/com.miui.voiceassist/cache"))
+                    when {
+                        !reported -> "扫描结果保存失败，请重试"
+                        result.scan.cacheable -> "扫描完成，请重启小爱以加载新符号"
+                        else -> result.scan.summary + "；请重启小爱应用停用状态"
                     }
-
-                    true
-                } catch (t: Throwable) {
-                    android.util.Log.e("XiaoAiProbe", "Manual rescanDexSymbols failed: $t", t)
-                    false
                 }
-            }
-
-            _isScanningDex.value = false
-            refreshStatus()
-            if (success) {
-                showToast("重新扫描完成，耗时 ${io.mo.xiaoaiplug.hook.dex.DexAdapter.lastDurationMs}ms")
-            } else {
+                refreshStatus()
+                showToast(message)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (t: Exception) {
+                android.util.Log.e("XiaoAiProbe", "Manual dex rescan failed", t)
                 showToast("未找到小爱 APK 或扫描失败")
+            } finally {
+                _isScanningDex.value = false
             }
         }
     }

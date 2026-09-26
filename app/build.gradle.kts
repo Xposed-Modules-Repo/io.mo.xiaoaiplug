@@ -83,5 +83,7 @@ dependencies {
     // 目前是 Tools.isReadOnlyShell:它决定模型能不能以 root 执行任意命令,
     // 是全项目最不该被悄悄改坏的一段,必须有回归保护。
     testImplementation(libs.junit)
+    // Real JSON codec for cache-corruption and cross-process handoff regression tests.
+    testImplementation("org.json:json:20240303")
 }
 

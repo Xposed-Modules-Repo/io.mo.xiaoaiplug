@@ -233,17 +233,17 @@ fun DexSymbolsDialog(
                                             Modifier
                                                 .size(8.dp)
                                                 .clip(CircleShape)
-                                                .background(if (isScanning) Color(0xFFFF9500) else Color(0xFF34C759))
+                                                .background(if (isScanning || !dexStatus.homeOk) Color(0xFFFF9500) else Color(0xFF34C759))
                                         )
                                         Spacer(Modifier.width(6.dp))
                                         Text(
-                                            text = if (isScanning) "正在分析 DexKit 指纹…" else "已就绪 ${detailedList.size}/${detailedList.size} 个符号",
+                                            text = if (isScanning) "正在分析 DexKit 指纹…" else "指纹命中 ${dexStatus.matchedCount}/${io.mo.xiaoaiplug.hook.dex.DexScanResult.REQUIRED_KEYS.size}",
                                             fontWeight = FontWeight.SemiBold,
                                             fontSize = 13.sp
                                         )
                                     }
                                     Text(
-                                        text = if (isScanning) "分析中" else if (dexStatus.durationMs > 0) "${dexStatus.durationMs}ms" else "缓存秒级命中",
+                                        text = if (isScanning) "分析中" else if (dexStatus.time > 0) "${dexStatus.durationMs}ms" else "尚未扫描",
                                         fontSize = 12.sp,
                                         color = MiuixTheme.colorScheme.primary,
                                         fontWeight = FontWeight.Medium
@@ -252,13 +252,27 @@ fun DexSymbolsDialog(
 
                                 Spacer(Modifier.height(4.dp))
 
-                                val sourceText = if (isScanning) "后台扫描中" else dexStatus.source.ifBlank { "内置默认 / 自动解析" }
+                                val sourceText = if (isScanning) "后台扫描中" else dexStatus.source.ifBlank { "尚未扫描" }
                                 val timeText = if (dexStatus.time > 0) {
                                     SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(dexStatus.time))
                                 } else "待小爱首次运行同步"
 
                                 Text(
                                     text = "来源: $sourceText · $timeText",
+                                    fontSize = 11.sp,
+                                    color = MiuixTheme.colorScheme.onBackgroundVariant
+                                )
+                                Text(
+                                    text = when {
+                                        dexStatus.pending -> "扫描结果待应用，请重启小爱"
+                                        dexStatus.hostLoaded -> "宿主已读取；未命中项不启用"
+                                        else -> "尚未收到宿主加载确认"
+                                    },
+                                    fontSize = 11.sp,
+                                    color = MiuixTheme.colorScheme.onBackgroundVariant
+                                )
+                                if (dexStatus.summary.isNotBlank()) Text(
+                                    text = dexStatus.summary,
                                     fontSize = 11.sp,
                                     color = MiuixTheme.colorScheme.onBackgroundVariant
                                 )
@@ -300,7 +314,7 @@ fun DexSymbolsDialog(
                                 }
                             } else {
                                 filteredList.forEach { item ->
-                                    SymbolItemRow(item)
+                                    SymbolItemRow(item, dexStatus.states[item.key])
                                     Spacer(Modifier.height(4.dp))
                                 }
                             }
@@ -336,14 +350,17 @@ fun DexSymbolsDialog(
 }
 
 @Composable
-private fun SymbolItemRow(item: io.mo.xiaoaiplug.hook.dex.SymbolDetail) {
+private fun SymbolItemRow(
+    item: io.mo.xiaoaiplug.hook.dex.SymbolDetail,
+    scan: io.mo.xiaoaiplug.hook.dex.SymbolScan?
+) {
     val context = LocalContext.current
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .clickable {
+            .clickable(enabled = item.resolvedClass.isNotBlank()) {
                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText(item.name, item.resolvedClass))
                 Toast.makeText(context, "已复制: ${item.resolvedClass}", Toast.LENGTH_SHORT).show()
@@ -370,9 +387,20 @@ private fun SymbolItemRow(item: io.mo.xiaoaiplug.hook.dex.SymbolDetail) {
                 fontSize = 11.sp,
                 color = MiuixTheme.colorScheme.onBackgroundVariant
             )
+            if (!scan?.detail.isNullOrBlank()) Text(
+                text = scan!!.detail,
+                fontSize = 10.sp,
+                color = MiuixTheme.colorScheme.onBackgroundVariant
+            )
             Spacer(Modifier.height(2.dp))
             Text(
-                text = item.resolvedClass,
+                text = (scan?.state ?: io.mo.xiaoaiplug.hook.dex.SymbolState.DEFAULT).label +
+                    (scan?.let { " · ${it.durationMs}ms" } ?: ""),
+                fontSize = 11.sp,
+                color = MiuixTheme.colorScheme.onBackgroundVariant
+            )
+            Text(
+                text = item.resolvedClass.ifBlank { "未解析（不启用）" },
                 fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
                 color = MiuixTheme.colorScheme.primary,

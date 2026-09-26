@@ -4,26 +4,27 @@ import org.json.JSONObject
 
 /**
  * 小爱同学中被 Hook 的目标类名与方法名符号映射表。
- * 默认值为当前已知版本的硬编码符号，当 DexKit 动态扫描成功时会被新版符号覆盖。
+ * 空值表示尚未验证或未命中；只有本次扫描确认的符号才能用于 Hook。
  */
 data class TargetSymbols(
-    var operationManagerClass: String = "com.xiaomi.voiceassistant.instruction.base.OperationManager",
-    var rnCardClass: String = "com.xiaomi.voiceassistant.instruction.card.b",
-    var bridgeClass: String = "kc1.a",
-    var audioTrackManagerClass: String = "u51.f",
-    var toastStreamPlayerClass: String = "xf1.v1",
-    var ttsBridgeClass: String = "com.xiaomi.voiceassistant.m2",
-    var asrProcessorClass: String = "s41.c",
-    var agentActionClass: String = "fo1.x0",
-    var toastOperationClass: String = "yg1.jf",
-    var uiNavOperationClass: String = "yg1.lg",
-    var speakContentClass: String = "com.xiaomi.voiceassistant.instruction.utils.x2",
-    var intentUtilsWrapperClass: String = "com.xiaomi.voiceassistant.instruction.utils.IntentUtilsWrapper",
-    var intentUtilsClass: String = "com.xiaomi.voiceassistant.utils.t2",
-    var chatDbManagerClass: String = "com.xiaomi.voiceassistant.skills.model.chat.a",
-    var flowToastCardClass: String = "com.xiaomi.voiceassistant.instruction.card.stream.b",
-    var flowControllerClass: String = "tl1.t0",
-    var floatManagerClass: String = "com.xiaomi.voiceassistant.widget.s1"
+    val operationManagerClass: String = "",
+    val rnCardClass: String = "",
+    val bridgeClass: String = "",
+    val audioTrackManagerClass: String = "",
+    val toastStreamPlayerClass: String = "",
+    val ttsBridgeClass: String = "",
+    val asrProcessorClass: String = "",
+    val agentActionClass: String = "",
+    val toastOperationClass: String = "",
+    val uiNavOperationClass: String = "",
+    val uiNavMethodName: String = "",
+    val speakContentClass: String = "",
+    val intentUtilsWrapperClass: String = "",
+    val intentUtilsClass: String = "",
+    val chatDbManagerClass: String = "",
+    val flowToastCardClass: String = "",
+    val flowControllerClass: String = "",
+    val floatManagerClass: String = ""
 ) {
 
     fun toJson(): JSONObject = JSONObject().apply {
@@ -37,6 +38,7 @@ data class TargetSymbols(
         put("agentActionClass", agentActionClass)
         put("toastOperationClass", toastOperationClass)
         put("uiNavOperationClass", uiNavOperationClass)
+        put("uiNavMethodName", uiNavMethodName)
         put("speakContentClass", speakContentClass)
         put("intentUtilsWrapperClass", intentUtilsWrapperClass)
         put("intentUtilsClass", intentUtilsClass)
@@ -57,6 +59,7 @@ data class TargetSymbols(
         SymbolDetail("speakContentClass", "播报内容管理器", "卡片右下角喇叭重播与内容同步管理器", speakContentClass),
         SymbolDetail("toastOperationClass", "Toast 话术卡片操作器", "固定话术卡片构建与接管 (FlowTemplateToastCard)", toastOperationClass),
         SymbolDetail("uiNavOperationClass", "后台应用导航拦截", "拦截杀后台时触发的 OPEN_BACKGROUND_APPS 模拟按键", uiNavOperationClass),
+        SymbolDetail("uiNavMethodName", "后台应用导航方法", "无参 void 方法，调用 setSimulateKeyEvent(187)", uiNavMethodName),
         SymbolDetail("agentActionClass", "Agent 动作执行器", "拦截小爱执行的系统设置跳转 Agent.Action", agentActionClass),
         SymbolDetail("intentUtilsWrapperClass", "设置跳转包装器", "拦截查看类指令跳转系统设置页", intentUtilsWrapperClass),
         SymbolDetail("intentUtilsClass", "Intent 启动工具", "拦截兜底全局搜索与底层 Activity 启动", intentUtilsClass),
@@ -80,6 +83,7 @@ data class TargetSymbols(
                 agentActionClass = json.optString("agentActionClass", defaults.agentActionClass),
                 toastOperationClass = json.optString("toastOperationClass", defaults.toastOperationClass),
                 uiNavOperationClass = json.optString("uiNavOperationClass", defaults.uiNavOperationClass),
+                uiNavMethodName = json.optString("uiNavMethodName", defaults.uiNavMethodName),
                 speakContentClass = json.optString("speakContentClass", defaults.speakContentClass),
                 intentUtilsWrapperClass = json.optString("intentUtilsWrapperClass", defaults.intentUtilsWrapperClass),
                 intentUtilsClass = json.optString("intentUtilsClass", defaults.intentUtilsClass),

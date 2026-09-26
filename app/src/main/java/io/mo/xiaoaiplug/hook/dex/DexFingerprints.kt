@@ -1,5 +1,6 @@
 package io.mo.xiaoaiplug.hook.dex
 
+import android.os.SystemClock
 import android.util.Log
 import org.luckypray.dexkit.DexKitBridge
 import org.luckypray.dexkit.query.FindClass
@@ -11,287 +12,151 @@ import java.lang.reflect.Modifier
 
 private const val TAG = "XiaoAiProbe.Dex"
 
-/**
- * 针对小爱同学混淆类与方法的特征指纹库。
- * 每个指纹通过字符串引用、方法签名、调用关系等强语义特征进行匹配。
- */
+/** Each rule records its own outcome; ambiguous candidates never silently become a match. */
 object DexFingerprints {
+    fun scan(bridge: DexKitBridge, defaultSymbols: TargetSymbols): DexScanResult {
+        val values = defaultSymbols.toJson()
+        val states = defaultSymbols.getDetailedList().associate {
+            it.key to SymbolScan(SymbolState.DEFAULT)
+        }.toMutableMap()
 
-    fun scan(bridge: DexKitBridge, defaultSymbols: TargetSymbols): TargetSymbols {
-        val resolved = defaultSymbols.copy()
-
-        // 1. RN 卡片类 (原 TemplateReactNativeCard, 新版 com.xiaomi.voiceassistant.instruction.card.b)
-        // 特征: 包含字符串 "TemplateReactNativeCard" 或拥有 rnStartReceiveInstruction 方法,且不是内部类
-        runCatching {
-            val rnCardClass = bridge.findClass(
-                FindClass.create().matcher(
-                    ClassMatcher.create().addUsingString("TemplateReactNativeCard")
-                )
-            ).firstOrNull { it.name.startsWith("com.xiaomi.voiceassistant.instruction.card.") && !it.name.contains("$") }
-                ?: bridge.findClass(
-                    FindClass.create().matcher(
-                        ClassMatcher.create().addMethod(
-                            MethodMatcher.create().name("rnStartReceiveInstruction")
-                        )
-                    )
-                ).firstOrNull { it.name.startsWith("com.xiaomi.voiceassistant.instruction.card.") && !it.name.contains("$") }
-            if (rnCardClass != null) {
-                resolved.rnCardClass = rnCardClass.name
-                Log.i(TAG, "Fingerprint matched rnCardClass: ${resolved.rnCardClass}")
+        fun classes(matcher: ClassMatcher) = bridge.findClass(FindClass.create().matcher(matcher)).map { it.name }
+        fun methods(matcher: MethodMatcher) = bridge.findMethod(FindMethod.create().matcher(matcher))
+        fun owners(matcher: MethodMatcher) = methods(matcher).map { it.className }.distinct()
+        fun resolve(key: String, query: () -> List<String>) {
+            val start = SystemClock.elapsedRealtime()
+            var detail = ""
+            val state = try {
+                val candidates = query().distinct().sorted()
+                val (name, status) = uniqueCandidate(candidates)
+                detail = if (candidates.isEmpty()) "未找到符合指纹条件的候选" else "候选: ${candidates.joinToString()}"
+                if (name != null) values.put(key, name)
+                status
+            } catch (t: Throwable) {
+                Log.w(TAG, "Fingerprint $key failed", t)
+                detail = "${t.javaClass.simpleName}: ${t.message.orEmpty()}"
+                SymbolState.ERROR
             }
-        }.onFailure { Log.w(TAG, "Fingerprint scan rnCardClass failed", it) }
+            val duration = SystemClock.elapsedRealtime() - start
+            states[key] = SymbolScan(state, duration, detail)
+            Log.i(TAG, "Fingerprint $key: $state (${duration}ms) $detail")
+        }
 
-        // 2. ASR 处理器 (原 z10.a, 新版 q41.c)
-        // 特征: 拥有 processed(Instruction) 方法且内部引用 "SpeechRecognizer.RecognizeResult"
-        runCatching {
-            val asrMethod = bridge.findMethod(
-                FindMethod.create().matcher(
-                    MethodMatcher.create()
-                        .name("processed")
-                        .addUsingString("SpeechRecognizer.RecognizeResult")
-                )
-            ).firstOrNull() ?: bridge.findMethod(
-                FindMethod.create().matcher(
-                    MethodMatcher.create().addUsingString("SpeechRecognizer.RecognizeResult")
-                )
-            ).firstOrNull { it.name == "processed" }
-            if (asrMethod != null) {
-                resolved.asrProcessorClass = asrMethod.className
-                Log.i(TAG, "Fingerprint matched asrProcessorClass: ${resolved.asrProcessorClass}")
+        resolve("operationManagerClass") {
+            classes(ClassMatcher.create().className("com.xiaomi.voiceassistant.instruction.base.OperationManager")
+                .addMethod(MethodMatcher.create().name("setQueryInfo")))
+        }
+        resolve("intentUtilsWrapperClass") {
+            classes(ClassMatcher.create().className("com.xiaomi.voiceassistant.instruction.utils.IntentUtilsWrapper")
+                .addMethod(MethodMatcher.create().name("startActivitySafely")))
+        }
+
+        resolve("rnCardClass") {
+            fun List<String>.cards() = filter {
+                it.startsWith("com.xiaomi.voiceassistant.instruction.card.") && !it.contains('$')
             }
-        }.onFailure { Log.w(TAG, "Fingerprint scan asrProcessorClass failed", it) }
-
-        // 3. RN Bridge (原 r70.a, 新版 ic1.a)
-        // 特征: 拥有 sendStreamData(String, String) 方法
-        runCatching {
-            val bridgeMethod = bridge.findMethod(
-                FindMethod.create().matcher(
-                    MethodMatcher.create()
-                        .name("sendStreamData")
-                        .addParamType("java.lang.String")
-                        .addParamType("java.lang.String")
-                )
-            ).firstOrNull()
-            if (bridgeMethod != null) {
-                resolved.bridgeClass = bridgeMethod.className
-                Log.i(TAG, "Fingerprint matched bridgeClass: ${resolved.bridgeClass}")
+            classes(ClassMatcher.create().addUsingString("TemplateReactNativeCard")).cards().ifEmpty {
+                classes(ClassMatcher.create().addMethod(
+                    MethodMatcher.create().name("rnStartReceiveInstruction"))).cards()
             }
-        }.onFailure { Log.w(TAG, "Fingerprint scan bridgeClass failed", it) }
-
-        // 4. 音频音轨管理器 (原 v20.e, 新版 s51.f)
-        // 特征: 包含静态方法 getMainAudioTrack 或引用特定音轨名 "toastStreamTts"
-        runCatching {
-            val trackMethod = bridge.findMethod(
-                FindMethod.create().matcher(
-                    MethodMatcher.create()
-                        .name("getMainAudioTrack")
-                        .modifiers(Modifier.STATIC or Modifier.PUBLIC)
-                )
-            ).firstOrNull()
-            if (trackMethod != null) {
-                resolved.audioTrackManagerClass = trackMethod.className
-                Log.i(TAG, "Fingerprint matched audioTrackManagerClass: ${resolved.audioTrackManagerClass}")
-            } else {
-                val trackClass = bridge.findClass(
-                    FindClass.create().matcher(
-                        ClassMatcher.create().addUsingString("toastStreamTts")
-                    )
-                ).firstOrNull()
-                if (trackClass != null) {
-                    resolved.audioTrackManagerClass = trackClass.name
-                    Log.i(TAG, "Fingerprint (by string) matched audioTrackManagerClass: ${resolved.audioTrackManagerClass}")
-                }
+        }
+        resolve("asrProcessorClass") {
+            // The old fallback repeated this same predicate in Kotlin after a second full query.
+            owners(MethodMatcher.create().name("processed")
+                .addParamType("com.xiaomi.ai.api.common.Instruction")
+                .addUsingString("SpeechRecognizer.RecognizeResult"))
+        }
+        resolve("bridgeClass") {
+            owners(MethodMatcher.create().name("sendStreamData")
+                .addParamType("java.lang.String").addParamType("java.lang.String"))
+        }
+        resolve("audioTrackManagerClass") {
+            owners(MethodMatcher.create().name("getMainAudioTrack")
+                .modifiers(Modifier.STATIC or Modifier.PUBLIC)).ifEmpty {
+                classes(ClassMatcher.create().addUsingString("toastStreamTts"))
             }
-        }.onFailure { Log.w(TAG, "Fingerprint scan audioTrackManagerClass failed", it) }
-
-        // 5. ToastStreamPlayer 播放器 (原 la0.n1, 新版 wf1.v1)
-        // 特征: 拥有 speakTts(String)Ljava/lang/String; 方法或拥有 getToastStreamAudioTrackTask
-        runCatching {
-            val playerMethod = bridge.findMethod(
-                FindMethod.create().matcher(
-                    MethodMatcher.create()
-                        .name("speakTts")
-                        .addParamType("java.lang.String")
-                        .returnType("java.lang.String")
-                )
-            ).firstOrNull { !it.className.contains("$") }
-                ?: bridge.findClass(
-                    FindClass.create().matcher(
-                        ClassMatcher.create().addMethod(
-                            MethodMatcher.create().name("getToastStreamAudioTrackTask")
-                        )
-                    )
-                ).firstOrNull { !it.name.contains("$") }?.let { cls ->
-                    bridge.findMethod(
-                        FindMethod.create().matcher(
-                            MethodMatcher.create().name("speakTts")
-                        )
-                    ).firstOrNull { it.className == cls.name }
-                }
-            if (playerMethod != null) {
-                resolved.toastStreamPlayerClass = playerMethod.className
-                Log.i(TAG, "Fingerprint matched toastStreamPlayerClass: ${resolved.toastStreamPlayerClass}")
+        }
+        resolve("toastStreamPlayerClass") {
+            owners(MethodMatcher.create().name("speakTts").addParamType("java.lang.String")
+                .returnType("java.lang.String")).filter { !it.contains('$') }.ifEmpty {
+                // Both methods must belong to the same class; no second global method search.
+                classes(ClassMatcher.create()
+                    .addMethod(MethodMatcher.create().name("getToastStreamAudioTrackTask"))
+                    .addMethod(MethodMatcher.create().name("speakTts")))
+                    .filter { !it.contains('$') }
             }
-        }.onFailure { Log.w(TAG, "Fingerprint scan toastStreamPlayerClass failed", it) }
-
-        // 6. AgentActionManager (原 kh0.s0 -> bo1.w0 -> 新版 fo1.x0)
-        // 特征: 拥有以 Agent.Action 为参数的 executeActionsAsync 重载。
-        // 必须限定 Agent$Action 参数:同名方法还存在于 AIDL Binder 桩类(如 qm0.a,参数是 JSONArray),
-        // 那条只是 IPC 边界,挂上去拦不到动作本体,会让整条 Agent 拦截失效。
-        runCatching {
-            val actionMethod = bridge.findMethod(
-                FindMethod.create().matcher(
-                    MethodMatcher.create()
-                        .name("executeActionsAsync")
-                        .addParamType("com.xiaomi.ai.api.Agent\$Action")
-                )
-            ).firstOrNull()
-            if (actionMethod != null) {
-                resolved.agentActionClass = actionMethod.className
-                Log.i(TAG, "Fingerprint matched agentActionClass: ${resolved.agentActionClass}")
+        }
+        resolve("agentActionClass") {
+            // Binder stubs with JSONArray arguments are not the action implementation.
+            owners(MethodMatcher.create().name("executeActionsAsync")
+                .addParamType("com.xiaomi.ai.api.Agent\$Action").addParamType("java.lang.String"))
+        }
+        resolve("ttsBridgeClass") {
+            val prefix = "com.xiaomi.voiceassistant."
+            fun scope() = ClassMatcher.create().className(prefix, StringMatchType.StartsWith)
+            val singletonOwners = methods(MethodMatcher.create().name("getInstance").paramCount(0)
+                .modifiers(Modifier.PUBLIC or Modifier.STATIC).declaredClass(scope()))
+                .filter { it.returnType?.name == it.className }
+                .map { it.className }
+                .filter { !it.removePrefix(prefix).contains('.') && !it.contains('$') }.toSet()
+            fun stopOwners(name: String) = owners(MethodMatcher.create().name(name).paramCount(0)
+                .modifiers(Modifier.PUBLIC).declaredClass(scope())).filter { it in singletonOwners }
+            // Prefer the specific modern API. Older versions used several different stop names.
+            stopOwners("stopTTS").ifEmpty {
+                listOf("stop", "stopPlay", "stopSpeak").flatMap { stopOwners(it) }
             }
-        }.onFailure { Log.w(TAG, "Fingerprint scan agentActionClass failed", it) }
-
-        // fakeDialogId 在很多不相关类中出现，必须用操作器自身的日志标识。
-        runCatching {
-            val toastOpClass = bridge.findClass(
-                FindClass.create().matcher(
-                    ClassMatcher.create().addUsingString("TemplateToastOperation")
-                )
-            ).singleOrNull { !it.name.contains("$") }
-            if (toastOpClass != null) {
-                resolved.toastOperationClass = toastOpClass.name
-                Log.i(TAG, "Fingerprint matched toastOperationClass: ${resolved.toastOperationClass}")
-            }
-        }.onFailure { Log.w(TAG, "Fingerprint scan toastOperationClass failed", it) }
-
-        // 8. UI Nav 杀后台操作 (原 jb0.ue)
-        // 特征: 包含 OPEN_BACKGROUND_APPS 字符引用
-        runCatching {
-            val navClass = bridge.findClass(
-                FindClass.create().matcher(
-                    ClassMatcher.create().addUsingString("OPEN_BACKGROUND_APPS")
-                )
-            ).firstOrNull()
-            if (navClass != null) {
-                resolved.uiNavOperationClass = navClass.name
-                Log.i(TAG, "Fingerprint matched uiNavOperationClass: ${resolved.uiNavOperationClass}")
-            }
-        }.onFailure { Log.w(TAG, "Fingerprint scan uiNavOperationClass failed", it) }
-
-        // 9. SpeakContentManager (原 b2, 新版 com.xiaomi.voiceassistant.instruction.utils.x2)
-        // 特征: 包含 addFragment(String, String) 和 clean()
-        runCatching {
-            val speakClass = bridge.findClass(
-                FindClass.create().matcher(
-                    ClassMatcher.create()
-                        .addMethod(
-                            MethodMatcher.create()
-                                .name("addFragment")
-                                .addParamType("java.lang.String")
-                                .addParamType("java.lang.String")
-                        )
-                        .addMethod(
-                            MethodMatcher.create()
-                                .name("clean")
-                        )
-                )
-            ).firstOrNull()
-            if (speakClass != null) {
-                resolved.speakContentClass = speakClass.name
-                Log.i(TAG, "Fingerprint matched speakContentClass: ${resolved.speakContentClass}")
-            }
-        }.onFailure { Log.w(TAG, "Fingerprint scan speakContentClass failed", it) }
-
-        // 10. IntentUtils (原 m2, 新版 t2)
-        // 特征: 位于 com.xiaomi.voiceassistant.utils 包下且拥有 startActivitySafely(Intent, String)
-        runCatching {
-            val intentUtilsClass = bridge.findClass(
-                FindClass.create().matcher(
-                    ClassMatcher.create()
-                        .addMethod(
-                            MethodMatcher.create()
-                                .name("startActivitySafely")
-                                .addParamType("android.content.Intent")
-                                .addParamType("java.lang.String")
-                        )
-                )
-            ).firstOrNull { it.name.startsWith("com.xiaomi.voiceassistant.utils.") }
-            if (intentUtilsClass != null) {
-                resolved.intentUtilsClass = intentUtilsClass.name
-                Log.i(TAG, "Fingerprint matched intentUtilsClass: ${resolved.intentUtilsClass}")
-            }
-        }.onFailure { Log.w(TAG, "Fingerprint scan intentUtilsClass failed", it) }
-
-        // 11. ChatDbManager (原 com.xiaomi.voiceassistant.skills.model.chat.a)
-        // 特征: 包含数据库表名 "CHAT_MESSAGE_BEAN" 且不是 DAO 实体类
-        runCatching {
-            val chatDbClass = bridge.findClass(
-                FindClass.create().matcher(
-                    ClassMatcher.create()
-                        .addUsingString("CHAT_MESSAGE_BEAN")
-                        .addMethod(MethodMatcher.create().name("recordToSpeak"))
-                )
-            ).firstOrNull { !it.name.contains("$") }
-            if (chatDbClass != null) {
-                resolved.chatDbManagerClass = chatDbClass.name
-                Log.i(TAG, "Fingerprint matched chatDbManagerClass: ${resolved.chatDbManagerClass}")
-            }
-        }.onFailure { Log.w(TAG, "Fingerprint scan chatDbManagerClass failed", it) }
-
-        // 12. FlowTemplateToastCard (原 FlowTemplateToastCard, 新版 com.xiaomi.voiceassistant.instruction.card.stream.b)
-        // 特征: 拥有 updateCardText(String) 方法
-        runCatching {
-            val flowCardClass = bridge.findClass(
-                FindClass.create().matcher(
-                    ClassMatcher.create()
-                        .addUsingString("FlowTemplateToastCard")
-                        .addMethod(
-                            MethodMatcher.create()
-                                .name("updateCardText")
-                                .addParamType("java.lang.String")
-                        )
-                )
-            ).firstOrNull { it.name.contains("card") }
-            if (flowCardClass != null) {
-                resolved.flowToastCardClass = flowCardClass.name
-                Log.i(TAG, "Fingerprint matched flowToastCardClass: ${resolved.flowToastCardClass}")
-            }
-        }.onFailure { Log.w(TAG, "Fingerprint scan flowToastCardClass failed", it) }
-
-        // 13. 新版结果分发器与浮窗容器，不能沿用旧版本的混淆类名。
-        runCatching {
-            bridge.findClass(FindClass.create().matcher(
-                ClassMatcher.create().addUsingString("ResultCardManagerController")
-                    .addMethod(MethodMatcher.create().name("addCard")
-                        .addParamType("com.xiaomi.voiceassistant.card.a"))
-            )).singleOrNull { !it.name.contains("$") }?.let {
-                resolved.flowControllerClass = it.name
-            }
-        }.onFailure { Log.w(TAG, "Fingerprint scan flowControllerClass failed", it) }
-
-        // 14. 悬浮窗卡片容器 (原 widget.r1, 新版 widget.s1)。
-        // 没有稳定字符串可锚,改用 UiManager.getFloatManager() 的返回类型反查 ——
-        // 这个方法名不混淆,返回的正是浮窗那套 addCard sink。
-        runCatching {
-            val floatManager = bridge.findMethod(
-                FindMethod.create().matcher(
-                    MethodMatcher.create()
-                        .name("getFloatManager")
-                        .declaredClass("com.xiaomi.voiceassistant.UiManager")
-                )
-            ).firstOrNull()?.returnType?.name
-                ?: bridge.findMethod(
-                    FindMethod.create().matcher(
-                        MethodMatcher.create().name("getFloatManager")
-                    )
-                ).firstOrNull()?.returnType?.name
-            if (floatManager != null && floatManager.startsWith("com.xiaomi.voiceassistant.")) {
-                resolved.floatManagerClass = floatManager
-                Log.i(TAG, "Fingerprint matched floatManagerClass: ${resolved.floatManagerClass}")
-            }
-        }.onFailure { Log.w(TAG, "Fingerprint scan floatManagerClass failed", it) }
-
-        return resolved
+        }
+        resolve("toastOperationClass") {
+            classes(ClassMatcher.create().addUsingString("TemplateToastOperation")
+                .addMethod(MethodMatcher.create().name("setRedefinedToastText").addParamType("java.lang.String"))
+                .addMethod(MethodMatcher.create().name("setNeedChangeToastText").addParamType("boolean")))
+                .filter { !it.contains('$') }
+        }
+        fun navMethod() = MethodMatcher.create().paramCount(0).returnType("void")
+            .addUsingNumber(187).addInvoke(MethodMatcher.create().name("setSimulateKeyEvent")
+                .addParamType("int"))
+        resolve("uiNavOperationClass") {
+            // OPEN_BACKGROUND_APPS is an enum field reference, not a string in this class.
+            classes(ClassMatcher.create().addUsingString("UIControllerNavigate").addMethod(navMethod()))
+        }
+        resolve("uiNavMethodName") {
+            if (states["uiNavOperationClass"]?.state != SymbolState.MATCHED) emptyList()
+            else methods(navMethod().declaredClass(values.getString("uiNavOperationClass"))).map { it.name }
+        }
+        resolve("speakContentClass") {
+            classes(ClassMatcher.create()
+                .addMethod(MethodMatcher.create().name("addFragment")
+                    .addParamType("java.lang.String").addParamType("java.lang.String"))
+                .addMethod(MethodMatcher.create().name("clean")))
+        }
+        resolve("intentUtilsClass") {
+            classes(ClassMatcher.create().addMethod(MethodMatcher.create().name("startActivitySafely")
+                .addParamType("android.content.Intent").addParamType("java.lang.String")))
+                .filter { it.startsWith("com.xiaomi.voiceassistant.utils.") }
+        }
+        resolve("chatDbManagerClass") {
+            // The table-name literal belongs to the DAO, not the manager that records speech.
+            classes(ClassMatcher.create().addUsingString("ChatDbManager")
+                .addMethod(MethodMatcher.create().name("recordToSpeak").addParamType("java.lang.String")))
+                .filter { !it.contains('$') }
+        }
+        resolve("flowToastCardClass") {
+            classes(ClassMatcher.create().addUsingString("FlowTemplateToastCard")
+                .addMethod(MethodMatcher.create().name("updateCardText").addParamType("java.lang.String")))
+                .filter { it.contains("card") }
+        }
+        resolve("flowControllerClass") {
+            // Several containers log this name and expose addCard; use the typed accessor.
+            methods(MethodMatcher.create().name("getResultCardManagerController").paramCount(0)
+                .declaredClass("com.xiaomi.voiceassistant.UiManager"))
+                .mapNotNull { it.returnType?.name }
+        }
+        resolve("floatManagerClass") {
+            methods(MethodMatcher.create().name("getFloatManager")
+                .declaredClass("com.xiaomi.voiceassistant.UiManager"))
+                .ifEmpty { methods(MethodMatcher.create().name("getFloatManager")) }
+                .mapNotNull { it.returnType?.name }.filter { it.startsWith("com.xiaomi.voiceassistant.") }
+        }
+        return DexScanResult(TargetSymbols.fromJson(values), states.toMap())
     }
 }

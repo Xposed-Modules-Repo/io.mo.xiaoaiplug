@@ -3,6 +3,7 @@ package io.mo.xiaoaiplug.config
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import io.mo.xiaoaiplug.hook.dex.diagnosticText
 
 data class AiConfig(
     // 服务商 key(见 AiProvider.key)。空串 = 旧存档,按 OpenAI 兼容处理。
@@ -183,62 +184,81 @@ object ConfigClient {
     }
 
     fun reportDexSymbols(
-        context: Context?,
-        symbolsJson: String,
-        durationMs: Long,
-        source: String,
-        appVersion: String
+        context: Context,
+        resolution: io.mo.xiaoaiplug.hook.dex.DexResolution,
+        appVersion: String,
+        manual: Boolean = false,
+        observedArtifactId: String? = null
     ): Boolean {
-        if (context == null) return false
         val extras = Bundle().apply {
-            putString("symbols_json", symbolsJson)
-            putLong("duration", durationMs)
-            putString("source", source)
+            putString("symbols_json", resolution.scan.symbols.toJson().toString())
+            putString("states_json", io.mo.xiaoaiplug.hook.dex.DexCacheArtifact
+                .statesToJson(resolution.scan.states).toString())
+            putLong("duration", resolution.durationMs)
+            putString("source", resolution.source)
             putString("app_version", appVersion)
+            putString("summary", resolution.scan.summary)
+            putBoolean("cacheable", resolution.scan.cacheable)
+            putBoolean("manual", manual)
+            putString("observed_id", observedArtifactId)
+            putString("artifact", resolution.artifact?.toJson()?.toString())
+            putString("diagnostic", resolution.scan.diagnosticText())
+            if (!manual) putString("loaded_id", resolution.artifact?.id)
         }
         return try {
-            val out = context.contentResolver.call(uri, ConfigProvider.METHOD_REPORT_DEX_SYMBOLS, null, extras)
-            out?.getBoolean("ok") == true
-        } catch (t: Throwable) {
-            false
-        }
+            context.contentResolver.call(uri, ConfigProvider.METHOD_REPORT_DEX_SYMBOLS, null, extras)
+                ?.getBoolean("ok") == true
+        } catch (_: Exception) { false }
     }
 
-    fun readDexSymbols(context: Context): DexStatusInfo {
-        val result: Bundle = try {
-            context.contentResolver.call(uri, ConfigProvider.METHOD_GET, null, null)
-        } catch (t: Throwable) {
-            null
-        } ?: return DexStatusInfo()
+    fun readDexArtifact(context: Context): String? = try {
+        context.contentResolver.call(uri, ConfigProvider.METHOD_GET_DEX_ARTIFACT, null, null)
+            ?.getString("artifact")
+    } catch (_: Exception) { null }
 
-        val jsonStr = result.getString(ConfigKeys.DEX_SYMBOLS_JSON).orEmpty()
-        val symbols = if (jsonStr.isNotBlank()) {
-            runCatching {
-                io.mo.xiaoaiplug.hook.dex.TargetSymbols.fromJson(org.json.JSONObject(jsonStr))
-            }.getOrDefault(io.mo.xiaoaiplug.hook.dex.TargetSymbols())
-        } else {
-            io.mo.xiaoaiplug.hook.dex.TargetSymbols()
-        }
-        val duration = result.getString(ConfigKeys.DEX_SYMBOLS_DURATION)?.toLongOrNull() ?: 0L
-        val source = result.getString(ConfigKeys.DEX_SYMBOLS_SOURCE).orEmpty()
-        val time = result.getString(ConfigKeys.DEX_SYMBOLS_TIME)?.toLongOrNull() ?: 0L
-        val appVersion = result.getString(ConfigKeys.DEX_APP_VERSION).orEmpty()
-
-        return DexStatusInfo(
-            symbols = symbols,
-            durationMs = duration,
-            source = source,
-            time = time,
-            appVersion = appVersion
+    fun readDexSymbols(context: Context): DexStatusInfo = try {
+        val bundle = context.contentResolver.call(uri, ConfigProvider.METHOD_GET_DEX_SYMBOLS, null, null)
+        val report = org.json.JSONObject(bundle?.getString("report") ?: "{}")
+        DexStatusInfo(
+            symbols = report.optJSONObject("symbols")?.let {
+                io.mo.xiaoaiplug.hook.dex.TargetSymbols.fromJson(it)
+            } ?: io.mo.xiaoaiplug.hook.dex.TargetSymbols(),
+            states = io.mo.xiaoaiplug.hook.dex.DexCacheArtifact.statesFromJson(
+                report.optJSONObject("states")?.toString()),
+            durationMs = report.optLong("duration"),
+            source = report.optString("source"),
+            time = report.optLong("time"),
+            appVersion = report.optString("app_version"),
+            summary = report.optString("summary"),
+            cacheable = report.optBoolean("cacheable"),
+            pending = bundle?.getBoolean("pending") == true,
+            hostLoaded = bundle?.getBoolean("host_loaded") == true
         )
-    }
+    } catch (_: Exception) { DexStatusInfo() }
 }
 
 data class DexStatusInfo(
     val symbols: io.mo.xiaoaiplug.hook.dex.TargetSymbols = io.mo.xiaoaiplug.hook.dex.TargetSymbols(),
+    val states: Map<String, io.mo.xiaoaiplug.hook.dex.SymbolScan> = emptyMap(),
     val durationMs: Long = 0L,
     val source: String = "",
     val time: Long = 0L,
-    val appVersion: String = ""
-)
-
+    val appVersion: String = "",
+    val summary: String = "",
+    val cacheable: Boolean = false,
+    val pending: Boolean = false,
+    val hostLoaded: Boolean = false
+) {
+    val matchedCount: Int get() = io.mo.xiaoaiplug.hook.dex.DexScanResult(symbols, states).matchedCount
+    val totalCount: Int get() = io.mo.xiaoaiplug.hook.dex.DexScanResult.REQUIRED_KEYS.size
+    val fullyVerified: Boolean get() = time > 0 && cacheable && matchedCount == totalCount
+    val homeOk: Boolean get() = fullyVerified && hostLoaded && !pending
+    val homeSummary: String get() = when {
+        time == 0L -> "尚未扫描，未验证项停用"
+        !fullyVerified -> "已验证 $matchedCount/$totalCount 项 · 未命中项停用" +
+            if (pending) " · 待重启小爱" else ""
+        pending -> "已验证 $matchedCount/$totalCount 项 · 待重启小爱"
+        hostLoaded -> "已验证 $matchedCount/$totalCount 项 · 宿主已读取"
+        else -> "已验证 $matchedCount/$totalCount 项 · 待宿主确认"
+    }
+}

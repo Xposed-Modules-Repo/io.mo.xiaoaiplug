@@ -59,11 +59,9 @@ fun HomeScreen(
                     else "未激活。作用域需勾上「超级小爱」"
                 )
                 StatusRow(
-                    ok = status.dexStatus.symbols.asrProcessorClass.isNotBlank(),
+                    ok = status.dexStatus.homeOk,
                     title = "DEX缓存适配",
-                    summary = if (status.dexStatus.source.isNotBlank())
-                        "已适配 17/17 个混淆类 · ${status.dexStatus.source}"
-                    else "已就绪 17/17 个混淆类",
+                    summary = status.dexStatus.homeSummary,
                     action = { vm.openDexDialog() },
                     actionLabel = "查看"
                 )

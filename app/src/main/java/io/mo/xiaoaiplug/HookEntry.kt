@@ -18,7 +18,6 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import org.json.JSONObject
-import java.io.File
 import java.lang.ref.WeakReference
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -305,76 +304,66 @@ class HookEntry : IXposedHookLoadPackage {
         Log.i(TAG, "loaded into $TARGET_PKG process=${lpparam.processName} revision=reply-ui-2")
         targetClassLoader = lpparam.classLoader
 
-        // 动态 Dex 搜索与自适应符号解析 (当检测到小爱更新或初次运行时通过 DexKit 扫描，其余走缓存)
-        val apkPath = lpparam.appInfo?.sourceDir
-        val apkLastModified = if (apkPath != null) File(apkPath).lastModified() else 0L
-        val apkLength = if (apkPath != null) File(apkPath).length() else 0L
-        val cacheDir = lpparam.appInfo?.dataDir?.let { File(it, "cache") }
-
-        try {
-            if (apkPath != null) {
-                symbols = DexAdapter.resolveSymbols(
-                    apkPath = apkPath,
-                    cacheDir = cacheDir,
-                    appVersionCode = 0L,
-                    apkLastModified = apkLastModified,
-                    apkLength = apkLength
-                )
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "DexAdapter symbol resolution failed, fallback to defaults: $t")
-        }
-
-        // 挂钩宿主 Application.onCreate，确保在拥有非空 Context 时将自适应状态同步至模块界面
-        try {
-            XposedHelpers.findAndHookMethod(
-                "android.app.Application",
-                lpparam.classLoader,
-                "onCreate",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val app = param.thisObject as? Context ?: return
-                        val appVer = try {
-                            val pi = app.packageManager.getPackageInfo(app.packageName, 0)
-                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                                "v${pi.longVersionCode}"
-                            } else {
-                                @Suppress("DEPRECATION")
-                                "v${pi.versionCode}"
-                            }
-                        } catch (t: Throwable) {
-                            ""
-                        }
-                        Log.i(TAG, "Host Application initialized ($appVer), reporting dex symbols (source=${DexAdapter.lastSource})")
-                        ConfigClient.reportDexSymbols(
-                            context = app,
-                            symbolsJson = symbols.toJson().toString(),
-                            durationMs = DexAdapter.lastDurationMs,
-                            source = DexAdapter.lastSource,
-                            appVersion = appVer
+        // Context is available at Application.attach, before attachBaseContext/onCreate can
+        // invoke the target methods. Read the staged scan before installing any host hooks.
+        val initialized = AtomicBoolean(false)
+        XposedHelpers.findAndHookMethod(
+            "android.app.Application", lpparam.classLoader, "attach", Context::class.java,
+            object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val context = param.args.firstOrNull() as? Context ?: return
+                    if (context.packageName != TARGET_PKG || !initialized.compareAndSet(false, true)) return
+                    val version = runCatching {
+                        context.packageManager.getPackageInfo(TARGET_PKG, 0).longVersionCode
+                    }.getOrDefault(0L)
+                    val sharedArtifact = ConfigClient.readDexArtifact(context)
+                    val observedId = io.mo.xiaoaiplug.hook.dex.DexCacheArtifact.decode(sharedArtifact, requireComplete = false)?.id
+                    val resolution = try {
+                        DexAdapter.resolveSymbols(
+                            apkPath = context.applicationInfo.sourceDir,
+                            cacheDir = context.cacheDir,
+                            appVersionCode = version,
+                            sharedArtifact = sharedArtifact
+                        )
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "Dex resolution failed; using defaults", t)
+                        io.mo.xiaoaiplug.hook.dex.DexResolution(
+                            io.mo.xiaoaiplug.hook.dex.DexScanResult.failed(t.javaClass.simpleName),
+                            "解析失败，相关功能停用", 0L
                         )
                     }
+                    symbols = resolution.scan.symbols
+                    installHostHooks(lpparam.classLoader)
+                    // Secondary processes must not overwrite the main process's status.
+                    if (lpparam.processName == TARGET_PKG) {
+                        Handler(Looper.getMainLooper()).post {
+                            if (!ConfigClient.reportDexSymbols(context, resolution, "v$version",
+                                    observedArtifactId = observedId)) {
+                                Log.w(TAG, "Failed to report host dex status")
+                            }
+                        }
+                    }
                 }
-            )
-        } catch (t: Throwable) {
-            Log.w(TAG, "Failed to hook Application.onCreate for dex symbols reporting: $t")
-        }
+            }
+        )
+    }
 
-        hookOperationManager(lpparam.classLoader)
-        hookNativeAudio(lpparam.classLoader)
-        hookAuthoritativeText(lpparam.classLoader)
-        hookBridge(lpparam.classLoader)
-        hookCardBaseDiagnostic(lpparam.classLoader)
-        hookSettingsJump(lpparam.classLoader)
-        hookDismissLifecycle(lpparam.classLoader)
-        hookWebSearchFallback(lpparam.classLoader)
-        hookChatHistory(lpparam.classLoader)
-        hookCardSinks(lpparam.classLoader)
-        hookAsrResult(lpparam.classLoader)
-        hookAgentAction(lpparam.classLoader)
-        hookIntentLaunch(lpparam.classLoader)
-        hookToastCardBind(lpparam.classLoader)
-        hookBackgroundAppsNav(lpparam.classLoader)
+    private fun installHostHooks(cl: ClassLoader) {
+        hookOperationManager(cl)
+        hookNativeAudio(cl)
+        hookAuthoritativeText(cl)
+        hookBridge(cl)
+        hookCardBaseDiagnostic(cl)
+        hookSettingsJump(cl)
+        hookDismissLifecycle(cl)
+        hookWebSearchFallback(cl)
+        hookChatHistory(cl)
+        hookCardSinks(cl)
+        hookAsrResult(cl)
+        hookAgentAction(cl)
+        hookIntentLaunch(cl)
+        hookToastCardBind(cl)
+        hookBackgroundAppsNav(cl)
     }
 
     // 「查看类」不跳转:拦截 IntentUtilsWrapper 的所有跳转与隐藏卡片入口。
@@ -619,12 +608,12 @@ class HookEntry : IXposedHookLoadPackage {
             Log.i(TAG, "${symbols.uiNavOperationClass} not found: $e")
             return
         }
-        // z0() 无参、只做 setSimulateKeyEvent(187);按名字精确取,取不到就算了(混淆改名时不至于拖垮别的)
+        // The fingerprint resolves the obfuscated method by its signature and key-event call.
         val method = clazz.declaredMethods.firstOrNull {
-            it.name == "z0" && it.parameterTypes.isEmpty()
+            it.name == symbols.uiNavMethodName && it.parameterTypes.isEmpty() && it.returnType == Void.TYPE
         }
         if (method == null) {
-            Log.i(TAG, "${symbols.uiNavOperationClass}.z0() not found (obfuscation changed?)")
+            Log.i(TAG, "${symbols.uiNavOperationClass}.${symbols.uiNavMethodName}() not found")
             return
         }
         try {
@@ -639,9 +628,9 @@ class HookEntry : IXposedHookLoadPackage {
                     }
                 }
             })
-            Log.i(TAG, "hooked ${symbols.uiNavOperationClass}.z0 (OPEN_BACKGROUND_APPS)")
+            Log.i(TAG, "hooked ${symbols.uiNavOperationClass}.${symbols.uiNavMethodName} (OPEN_BACKGROUND_APPS)")
         } catch (t: Throwable) {
-            Log.i(TAG, "hook ${symbols.uiNavOperationClass}.z0 fail: $t")
+            Log.i(TAG, "hook ${symbols.uiNavOperationClass}.${symbols.uiNavMethodName} fail: $t")
         }
     }
 
@@ -1176,8 +1165,8 @@ class HookEntry : IXposedHookLoadPackage {
     private fun replyCardForSink(cl: ClassLoader, incoming: Any): Any? {
         replyCards.keyFor(incoming)?.let { return incoming }
         if (!replyTurns.ownsCurrent()) return null
-        if (!cl.loadClass(symbols.rnCardClass).isInstance(incoming) &&
-            !cl.loadClass(symbols.flowToastCardClass).isInstance(incoming)) return null
+        if (listOf(symbols.rnCardClass, symbols.flowToastCardClass).filter { it.isNotBlank() }
+                .none { runCatching { cl.loadClass(it).isInstance(incoming) }.getOrDefault(false) }) return null
         val history = runCatching { incoming.javaClass.getMethod("isHistoryCard").invoke(incoming) as? Boolean }.getOrNull()
         if (history == true) return null
         val id = runCatching { incoming.javaClass.getMethod("getDialogId").invoke(incoming) as? String }.getOrNull()
@@ -1446,6 +1435,7 @@ class HookEntry : IXposedHookLoadPackage {
             utteranceDialogs.computeIfAbsent(key) { ConcurrentHashMap.newKeySet() }.add(dialogId)
         }
         // RN ready 回调可能只 flush 了 Finish，没有普通 instruction 可供捕获 bridge。
+        if (symbols.bridgeClass.isBlank()) return s
         val bridgeType = targetClassLoader?.loadClass(symbols.bridgeClass) ?: return s
         var type: Class<*>? = card.javaClass
         while (type != null && type != Any::class.java) {

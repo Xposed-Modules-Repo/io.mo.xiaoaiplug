@@ -50,13 +50,6 @@ object ConfigKeys {
     // MCP 远程服务列表 JSON 字符串
     const val MCP_SERVERS = "mcp_servers"
 
-    // 动态 DexKit 混淆符号自适应状态
-    const val DEX_SYMBOLS_JSON = "dex_symbols_json"
-    const val DEX_SYMBOLS_TIME = "dex_symbols_time"
-    const val DEX_SYMBOLS_DURATION = "dex_symbols_duration"
-    const val DEX_SYMBOLS_SOURCE = "dex_symbols_source"
-    const val DEX_APP_VERSION = "dex_app_version"
-
     val ALL = listOf(
         PROVIDER, ENDPOINT, API_KEY, MODEL, SYSTEM_PROMPT, ENABLED,
         BLOCK_VIEW_JUMP, JUMP_ALLOW_WORDS,
@@ -65,8 +58,7 @@ object ConfigKeys {
         ENABLED_TOOLS, SHELL_POLICY, USE_NATIVE_TOOLS, CONTEXT_ENABLED,
         SKIP_TAKEOVER_ENABLED, SKIP_TAKEOVER_PATTERN,
         AUTO_FIX_ACCESSIBILITY,
-        MCP_SERVERS,
-        DEX_SYMBOLS_JSON, DEX_SYMBOLS_TIME, DEX_SYMBOLS_DURATION, DEX_SYMBOLS_SOURCE, DEX_APP_VERSION
+        MCP_SERVERS
     )
 }
 
@@ -108,6 +100,7 @@ class ConfigProvider : ContentProvider() {
         // 动态 Dex 符号上报
         const val METHOD_REPORT_DEX_SYMBOLS = "report_dex_symbols"
         const val METHOD_GET_DEX_SYMBOLS = "get_dex_symbols"
+        const val METHOD_GET_DEX_ARTIFACT = "get_dex_artifact"
 
         private const val PREFS_NAME = "xiaoai_plug_config"
 
@@ -138,6 +131,8 @@ class ConfigProvider : ContentProvider() {
 
     private fun prefs(): SharedPreferences =
         context!!.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private val dexStatus by lazy { DexStatusStore(context!!) }
 
     override fun onCreate(): Boolean = true
 
@@ -289,50 +284,12 @@ class ConfigProvider : ContentProvider() {
                     )
                 }
             }
+            METHOD_GET_DEX_SYMBOLS -> dexStatus.read()
+            METHOD_GET_DEX_ARTIFACT -> dexStatus.sharedArtifact()
             METHOD_REPORT_DEX_SYMBOLS -> {
                 if (extras == null) return Bundle().apply { putBoolean("ok", false) }
                 try {
-                    val symbolsJson = extras.getString("symbols_json").orEmpty()
-                    val duration = extras.getLong("duration", 0L)
-                    val source = extras.getString("source").orEmpty()
-                    val appVersion = extras.getString("app_version").orEmpty()
-                    val time = System.currentTimeMillis()
-
-                    val e = prefs().edit()
-                    e.putString(ConfigKeys.DEX_SYMBOLS_JSON, symbolsJson)
-                    e.putString(ConfigKeys.DEX_SYMBOLS_TIME, time.toString())
-                    e.putString(ConfigKeys.DEX_SYMBOLS_DURATION, duration.toString())
-                    e.putString(ConfigKeys.DEX_SYMBOLS_SOURCE, source)
-                    e.putString(ConfigKeys.DEX_APP_VERSION, appVersion)
-                    e.apply()
-
-                    // 如果是动态扫描出的结果，写一条运行记录
-                    if (source.contains("DexKit") || source.contains("扫描")) {
-                        val symObj = runCatching { org.json.JSONObject(symbolsJson) }.getOrNull()
-                        val details = buildString {
-                            append("来源: ").append(source).append(" · 耗时: ").append(duration).append("ms\n")
-                            if (appVersion.isNotBlank()) append("小爱版本: ").append(appVersion).append("\n\n")
-                            append("【符号映射列表】\n")
-                            if (symObj != null) {
-                                val keys = symObj.keys()
-                                while (keys.hasNext()) {
-                                    val k = keys.next()
-                                    append("• ").append(k).append(" -> ").append(symObj.optString(k)).append("\n")
-                                }
-                            }
-                        }
-                        LogStore.get(context!!).append(
-                            LogEntry(
-                                time = time,
-                                type = LogEntry.TYPE_TOOL,
-                                title = "自适应符号扫描 (DexKit)",
-                                detail = details,
-                                durationMs = duration,
-                                ok = true
-                            )
-                        )
-                    }
-                    Bundle().apply { putBoolean("ok", true) }
+                    dexStatus.report(extras, callingPackage == "io.mo.xiaoaiplug")
                 } catch (t: Throwable) {
                     Bundle().apply { putBoolean("ok", false) }
                 }
