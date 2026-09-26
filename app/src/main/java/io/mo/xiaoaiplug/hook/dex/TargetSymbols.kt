@@ -9,21 +9,21 @@ import org.json.JSONObject
 data class TargetSymbols(
     var operationManagerClass: String = "com.xiaomi.voiceassistant.instruction.base.OperationManager",
     var rnCardClass: String = "com.xiaomi.voiceassistant.instruction.card.b",
-    var bridgeClass: String = "fc1.a",
-    var audioTrackManagerClass: String = "p51.f",
-    var toastStreamPlayerClass: String = "tf1.v1",
-    var ttsBridgeClass: String = "com.xiaomi.voiceassistant.l2",
-    var asrProcessorClass: String = "n41.c",
-    var agentActionClass: String = "bo1.w0",
-    var toastOperationClass: String = "ug1.jf",
-    var uiNavOperationClass: String = "jb0.ue",
+    var bridgeClass: String = "kc1.a",
+    var audioTrackManagerClass: String = "u51.f",
+    var toastStreamPlayerClass: String = "xf1.v1",
+    var ttsBridgeClass: String = "com.xiaomi.voiceassistant.m2",
+    var asrProcessorClass: String = "s41.c",
+    var agentActionClass: String = "fo1.x0",
+    var toastOperationClass: String = "yg1.jf",
+    var uiNavOperationClass: String = "yg1.lg",
     var speakContentClass: String = "com.xiaomi.voiceassistant.instruction.utils.x2",
     var intentUtilsWrapperClass: String = "com.xiaomi.voiceassistant.instruction.utils.IntentUtilsWrapper",
     var intentUtilsClass: String = "com.xiaomi.voiceassistant.utils.t2",
     var chatDbManagerClass: String = "com.xiaomi.voiceassistant.skills.model.chat.a",
     var flowToastCardClass: String = "com.xiaomi.voiceassistant.instruction.card.stream.b",
-    var flowControllerClass: String = "pl1.t0",
-    var floatManagerClass: String = "com.xiaomi.voiceassistant.widget.r1"
+    var flowControllerClass: String = "tl1.t0",
+    var floatManagerClass: String = "com.xiaomi.voiceassistant.widget.s1"
 ) {
 
     fun toJson(): JSONObject = JSONObject().apply {

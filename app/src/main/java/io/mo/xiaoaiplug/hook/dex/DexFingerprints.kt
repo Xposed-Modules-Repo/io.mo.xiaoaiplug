@@ -134,12 +134,16 @@ object DexFingerprints {
             }
         }.onFailure { Log.w(TAG, "Fingerprint scan toastStreamPlayerClass failed", it) }
 
-        // 6. AgentActionManager (原 kh0.s0, 新版 eo1.w0)
-        // 特征: 拥有 executeActionsAsync 方法
+        // 6. AgentActionManager (原 kh0.s0 -> bo1.w0 -> 新版 fo1.x0)
+        // 特征: 拥有以 Agent.Action 为参数的 executeActionsAsync 重载。
+        // 必须限定 Agent$Action 参数:同名方法还存在于 AIDL Binder 桩类(如 qm0.a,参数是 JSONArray),
+        // 那条只是 IPC 边界,挂上去拦不到动作本体,会让整条 Agent 拦截失效。
         runCatching {
             val actionMethod = bridge.findMethod(
                 FindMethod.create().matcher(
-                    MethodMatcher.create().name("executeActionsAsync")
+                    MethodMatcher.create()
+                        .name("executeActionsAsync")
+                        .addParamType("com.xiaomi.ai.api.Agent\$Action")
                 )
             ).firstOrNull()
             if (actionMethod != null) {
@@ -265,6 +269,28 @@ object DexFingerprints {
                 resolved.flowControllerClass = it.name
             }
         }.onFailure { Log.w(TAG, "Fingerprint scan flowControllerClass failed", it) }
+
+        // 14. 悬浮窗卡片容器 (原 widget.r1, 新版 widget.s1)。
+        // 没有稳定字符串可锚,改用 UiManager.getFloatManager() 的返回类型反查 ——
+        // 这个方法名不混淆,返回的正是浮窗那套 addCard sink。
+        runCatching {
+            val floatManager = bridge.findMethod(
+                FindMethod.create().matcher(
+                    MethodMatcher.create()
+                        .name("getFloatManager")
+                        .declaredClass("com.xiaomi.voiceassistant.UiManager")
+                )
+            ).firstOrNull()?.returnType?.name
+                ?: bridge.findMethod(
+                    FindMethod.create().matcher(
+                        MethodMatcher.create().name("getFloatManager")
+                    )
+                ).firstOrNull()?.returnType?.name
+            if (floatManager != null && floatManager.startsWith("com.xiaomi.voiceassistant.")) {
+                resolved.floatManagerClass = floatManager
+                Log.i(TAG, "Fingerprint matched floatManagerClass: ${resolved.floatManagerClass}")
+            }
+        }.onFailure { Log.w(TAG, "Fingerprint scan floatManagerClass failed", it) }
 
         return resolved
     }

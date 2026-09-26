@@ -8,7 +8,7 @@ import java.io.File
 
 private const val TAG = "XiaoAiProbe.Dex"
 private const val CACHE_FILE_NAME = "xiaoai_plug_symbols_cache.json"
-private const val SYMBOL_SCHEMA_VERSION = 2
+private const val SYMBOL_SCHEMA_VERSION = 3
 
 /**
  * 负责 DexKit 动态扫描生命周期、版本更新感知与本地缓存管理。

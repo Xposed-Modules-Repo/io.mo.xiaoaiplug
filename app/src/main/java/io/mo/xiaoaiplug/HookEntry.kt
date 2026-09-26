@@ -1949,12 +1949,13 @@ class HookEntry : IXposedHookLoadPackage {
                 }
             } catch (t: Throwable) { }
 
-            // 2. 停止备用 TTS 引擎 (com.xiaomi.voiceassistant.l2)
+            // 2. 停止备用 TTS 引擎 (原 com.xiaomi.voiceassistant.l2, 新版 m2)
             try {
                 val ttsClazz = cl.loadClass(symbols.ttsBridgeClass)
                 val instance = ttsClazz.getMethod("getInstance").invoke(null)
                 if (instance != null) {
-                    for (m in listOf("stop", "stopPlay", "stopSpeak")) {
+                    // 新版把停播接口从 stop/stopPlay/stopSpeak 改成了 stopTTS,全部尝试一遍
+                    for (m in listOf("stopTTS", "stop", "stopPlay", "stopSpeak")) {
                         try {
                             ttsClazz.getMethod(m).invoke(instance)
                         } catch (t: Throwable) { }
