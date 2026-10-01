@@ -14,6 +14,7 @@ import io.mo.xiaoaiplug.hook.ReplyCards
 import io.mo.xiaoaiplug.hook.ReplyPresentation
 import io.mo.xiaoaiplug.hook.ReplyTextRenderer
 import io.mo.xiaoaiplug.hook.NativeActionPolicy
+import io.mo.xiaoaiplug.hook.InstructionHistory
 import io.mo.xiaoaiplug.hook.dex.DexAdapter
 import io.mo.xiaoaiplug.hook.dex.TargetSymbols
 import de.robv.android.xposed.IXposedHookLoadPackage
@@ -368,6 +369,7 @@ class HookEntry : IXposedHookLoadPackage {
         hookCardSinks(cl)
         hookAsrResult(cl)
         hookAgentAction(cl)
+        hookMiClawTools(cl)
         hookIntentLaunch(cl)
         hookSettingsSwitch(cl)
         hookToastCardBind(cl)
@@ -540,6 +542,7 @@ class HookEntry : IXposedHookLoadPackage {
                             !isAiTakeoverSkip(text, config)) {
                             replyTurns.claim(turn.key)
                             session(dialogId).takenOver = true
+                            markHistoryPending(dialogId)
                             startMutePump(dialogId)
                             startTrackedCall(turn.key, dialogId, turn.text, config)
                         }
@@ -696,6 +699,69 @@ class HookEntry : IXposedHookLoadPackage {
                 Log.i(TAG, "hook ${symbols.agentActionClass}.${m.name} fail: $t")
             }
         }
+    }
+
+    /**
+     * 拦小爱自带的 MiClaw 智能体的工具调用。MiClaw 和我们的 AI 并行处理同一句话、自己调工具,
+     * 真机上"刻在我心底的名字"被它 `cli: xiaoai play …` 直接在网易云放了歌,而我们只换掉了它的文字和播报。
+     * 接管轮次里它的回答本来就作废,工具的副作用也一并作废。
+     *
+     * 挂在 osbot 的统一执行器 ToolExecutor.execute(toolName, args, ExecutionContext, Continuation) 上:
+     * 包名未混淆、跨版本稳定,cli / apptool / bash 等所有工具都从这过。execute 是 suspend 函数,
+     * before 里直接给结果即同步返回;terminateAgent=true 让它这一轮就此收工,不再换别的工具重试。
+     *
+     * 只拦当前被接管、且问话对得上的那一轮:MiClaw 的定时 / 后台任务和当前问话无关,不能误伤。
+     */
+    private fun hookMiClawTools(cl: ClassLoader) {
+        val executor = try {
+            cl.loadClass("com.aios.osbot.tools.ToolExecutor")
+        } catch (t: Throwable) {
+            Log.i(TAG, "MiClaw ToolExecutor not found: $t")
+            return
+        }
+        val execute = executor.declaredMethods.firstOrNull {
+            it.name == "execute" && it.parameterTypes.size == 4 && it.parameterTypes[0] == String::class.java
+        } ?: run { Log.i(TAG, "MiClaw ToolExecutor.execute not found"); return }
+        val failure = try {
+            val type = cl.loadClass("com.aios.osbot.tools.FailureType")
+            val ctor = cl.loadClass("com.aios.osbot.tools.ToolResult\$Failure").getConstructor(
+                String::class.java, java.lang.Boolean.TYPE, type, Integer::class.java,
+                java.lang.Boolean.TYPE, String::class.java, String::class.java)
+            val permanent = type.enumConstants.first { (it as Enum<*>).name == "PERMANENT" }
+            ctor to permanent
+        } catch (t: Throwable) {
+            Log.i(TAG, "MiClaw ToolResult.Failure unavailable: $t")
+            return
+        }
+        XposedBridge.hookMethod(execute, object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                try {
+                    val tool = param.args[0] as? String ?: return
+                    val query = runCatching {
+                        param.args[2]?.javaClass?.getMethod("getOriginalUserQuery")?.invoke(param.args[2]) as? String
+                    }.getOrNull()
+                    if (!isTakenOverMiClawQuery(query)) {
+                        Log.i(TAG, "MiClaw tool passthrough: $tool query=${query?.take(40)}")
+                        return
+                    }
+                    Log.i(TAG, "block MiClaw tool: $tool query=${query?.take(40)} args=${param.args[1].toString().take(200)}")
+                    val (ctor, permanent) = failure
+                    param.result = ctor.newInstance(
+                        "该操作已由其他助手接管处理，无需执行。", false, permanent, null, true, null, null)
+                } catch (t: Throwable) {
+                    Log.i(TAG, "hookMiClawTools error: $t")
+                }
+            }
+        })
+        Log.i(TAG, "hooked MiClaw ToolExecutor.execute")
+    }
+
+    // MiClaw 拿到的 originalUserQuery 可能带前后缀,双向包含都算对得上;取不到就按"当前接管轮次"算。
+    private fun isTakenOverMiClawQuery(query: String?): Boolean {
+        val turn = replyTurns.ownedCurrent() ?: return false
+        if (android.os.SystemClock.elapsedRealtime() - turn.createdAt > 120_000L) return false
+        if (query.isNullOrBlank() || turn.text.isBlank()) return true
+        return query.contains(turn.text) || turn.text.contains(query.trim())
     }
 
     /**
@@ -1094,6 +1160,13 @@ class HookEntry : IXposedHookLoadPackage {
         return sessions.values.any { it.historyPending }
     }
 
+    // 标记这个对话"等我们的答案写进历史库"。旧对话的标记一并清掉:被新问话顶掉的轮次
+    // 永远等不到答案,留着会让 shouldSuppressHistory 把后面白名单直通轮次里小爱自己的回答也压掉。
+    private fun markHistoryPending(dialogId: String) {
+        for ((id, other) in sessions) if (id != dialogId) other.historyPending = false
+        session(dialogId).historyPending = true
+    }
+
     // 把我们自己的答案写进历史库,让 App 里的「历史对话」也显示替换后的内容
     private fun writeAnswerToHistory(dialogId: String, answer: String) {
         val s = sessionOrNull(dialogId) ?: return
@@ -1153,7 +1226,7 @@ class HookEntry : IXposedHookLoadPackage {
         // 会触发"拦截控制信令"逻辑导致小爱误判失败并播报"只能帮你到这了"。
         session(dialogId).pendingViewAnswer = true
         // 从现在起压制小爱写进历史库的兜底文案,直到我们的答案写进去
-        session(dialogId).historyPending = true
+        markHistoryPending(dialogId)
         // 关键:趁界面还活着,立刻加一张占位卡(答案 6 秒后才到,那时界面已收起就晚了)
         ensureAnswerCard(dialogId)
     }
@@ -1679,6 +1752,8 @@ class HookEntry : IXposedHookLoadPackage {
                     // 绝不给小爱原生 TTS 抢跑开口的机会(避免替换前后两段声音一起播放)。
                     val s = session(dialogId)
                     s.takenOver = true
+                    // 普通接管轮次也要把答案写回历史库,否则 App 历史里只剩用户的问话
+                    markHistoryPending(dialogId)
                     replyTurns.claim(turn.key)
                     startMutePump(dialogId)
 
@@ -2362,6 +2437,8 @@ class HookEntry : IXposedHookLoadPackage {
             ensureAnswerCard(dialogId)
             // 历史库同步换成我们的答案,否则回 App 看历史还是那句兜底话术
             writeAnswerToHistory(dialogId, answer)
+            // App 历史页读的是 instruction_info 里的指令回放,上面那份它不看
+            currentApplicationContext()?.let { InstructionHistory.patch(it, dialogId, answer) }
         } catch (t: Throwable) {
             Log.i(TAG, "applyAnswer failed dialogId=$dialogId: $t")
         }

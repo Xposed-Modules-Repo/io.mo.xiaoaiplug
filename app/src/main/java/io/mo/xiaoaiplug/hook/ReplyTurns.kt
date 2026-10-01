@@ -34,6 +34,7 @@ internal class ReplyTurns(private val now: () -> Long) {
     @Synchronized fun isCurrent(key: String): Boolean = current?.key == key
     @Synchronized fun keyFor(dialogId: String): String? = dialogs[dialogId]?.key
     @Synchronized fun ownsCurrent(): Boolean = current?.owned == true
+    @Synchronized fun ownedCurrent(): Turn? = current?.takeIf { it.owned }
     @Synchronized fun isCurrentDialog(dialogId: String): Boolean =
         current != null && dialogs[dialogId] === current
 
