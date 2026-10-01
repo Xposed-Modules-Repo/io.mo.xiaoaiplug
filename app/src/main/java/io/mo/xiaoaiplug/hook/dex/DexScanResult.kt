@@ -31,7 +31,8 @@ data class DexScanResult(
             "toastStreamPlayerClass", "agentActionClass", "toastOperationClass",
             "uiNavOperationClass", "speakContentClass", "intentUtilsClass",
             "chatDbManagerClass", "flowToastCardClass", "flowControllerClass", "floatManagerClass",
-            "ttsBridgeClass", "uiNavMethodName", "operationManagerClass", "intentUtilsWrapperClass"
+            "ttsBridgeClass", "uiNavMethodName", "operationManagerClass", "intentUtilsWrapperClass",
+            "settingsSwitchClass"
         )
 
         fun failed(message: String) = DexScanResult(states = REQUIRED_KEYS.associateWith {

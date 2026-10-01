@@ -23,7 +23,7 @@ class DexStatusInfoTest {
         val partial = complete().copy(states = complete().states +
             ("bridgeClass" to SymbolScan(SymbolState.NOT_FOUND)))
         assertFalse(partial.homeOk)
-        assertTrue(partial.homeSummary.contains("17/18"))
+        assertTrue(partial.homeSummary.contains("18/19"))
         assertTrue(partial.homeSummary.contains("未命中项停用"))
     }
 

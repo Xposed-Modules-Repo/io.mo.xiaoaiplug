@@ -88,7 +88,7 @@ object Tools {
             runShell, deviceStatus, wifiInfo, networkInfo, topMemoryApps, topStorageApps,
             listApps, launchApp, sendMessage, queryContacts, readFile,
             getSetting, setSetting,
-            mediaControl, setVolume, bluetoothControl,
+            mediaControl, setVolume, bluetoothControl, quickToggle,
             currentTime, recentNotifications, clipboard, getLocation, weather,
             readSmsCode, getScreenContent, getLogcat, appStateControl,
             saveMemory
@@ -1560,6 +1560,152 @@ object Tools {
         }
         val text = out.toString().trim()
         return text.ifEmpty { "没有已连接的蓝牙设备,或系统未记录电量" }
+    }
+
+    // ---------------------------------------------------------------- 快捷开关
+
+    /**
+     * 常用系统开关。命令表和解析在 [QuickToggle](纯逻辑,有单测),这里只管执行。
+     *
+     * 为什么要专门做:文本接管很宽,"打开手电筒"这类话也进我们的模型,而小爱原生的动作
+     * 在接管轮会被拦下(见 NativeActionPolicy)。没有这个工具时模型只能拿 set_setting 猜 key、
+     * 或 run_shell 自己拼命令 —— 好几轮,还常猜错(只写 airplane_mode_on 不会真进飞行模式)。
+     */
+    private val quickToggle = Spec(
+        name = "quick_toggle",
+        description = "开关常用系统功能：Wi-Fi、移动数据、飞行模式、NFC、手电筒、勿扰、深色模式、自动旋转、亮度、自动亮度、省电、定位",
+        modelHint = "「打开手电筒」→ target=flashlight action=on；「关掉 Wi-Fi」→ wifi off；" +
+                "「开勿扰」→ dnd on；「亮度调到三成」→ target=brightness action=set percent=30；" +
+                "「定位开着吗」→ action=status。一句话要动几个开关，就在同一轮里并行调几次。" +
+                "这些开关一律用本工具，不要用 set_setting 或 run_shell 代替。" +
+                "蓝牙用 bluetooth_control，音量用 set_volume。" +
+                "Wi-Fi/移动数据/飞行模式/NFC 是异步切换，返回「已发起」时别打包票说已经连上网。",
+        params = listOf(
+            Param("target", "string", "要操作的开关", required = true, enum = QuickToggle.TARGETS),
+            Param(
+                "action", "string",
+                "on 打开 / off 关闭 / toggle 切换 / status 查询 / set 设定亮度(仅 brightness)",
+                required = true, enum = listOf("on", "off", "toggle", "status", "set")
+            ),
+            Param("percent", "integer", "亮度百分比 0-100，仅 target=brightness、action=set 时用")
+        ),
+        // 查状态是只读的,未接管的轮次也该能查
+        mutatingWhen = { it.optString("action", "status").trim().lowercase() != "status" },
+        handler = { args, ctx -> quickToggleImpl(args, ctx) }
+    )
+
+    private fun quickToggleImpl(args: JSONObject, ctx: Context?): String {
+        val target = args.optString("target").trim().lowercase()
+        val action = args.optString("action", "status").trim().lowercase()
+        if (target == QuickToggle.FLASHLIGHT) return torchImpl(action, ctx)
+        if (target == QuickToggle.BRIGHTNESS) return brightnessImpl(action, args)
+        val sw = QuickToggle.SWITCHES[target]
+            ?: return "error: 不认识的开关 \"$target\"，可选：${QuickToggle.TARGETS.joinToString("、")}"
+
+        val cur = sw.parse(sh(sw.statusCmd))
+        val want = when (action) {
+            "status" -> return "${sw.label}：" + onOff(cur)
+            "on" -> true
+            "off" -> false
+            "toggle" -> cur?.not()
+                ?: return "error: 读不到${sw.label}当前状态，没法切换。请让用户明确说打开还是关闭。"
+            else -> return "error: ${sw.label}只支持 on / off / toggle / status"
+        }
+        val verb = if (want) "打开" else "关闭"
+        if (cur == want) return "${sw.label}本来就是${onOff(want)}状态，没有改动"
+
+        val (rc, out) = shRc(sw.setCmd(want))
+        if (rc != 0 || QuickToggle.looksFailed(out)) {
+            return "error: ${verb}${sw.label}失败(exit=$rc)：${out.take(300).ifBlank { "无输出" }}"
+        }
+        if (sw.async) return "已发起${verb}${sw.label}，几秒内生效"
+        // 同步类回读一次:命令正常退出但系统没认(ROM 改过实现)时,不能对用户报成功
+        return when (sw.parse(sh(sw.statusCmd))) {
+            want -> "已${verb}${sw.label}"
+            null -> "已执行${verb}${sw.label}，但读不到新状态，请让用户看一眼确认"
+            else -> "error: 命令执行了，但${sw.label}仍是${onOff(!want)}，这台设备可能不支持这样切换"
+        }
+    }
+
+    private fun onOff(state: Boolean?): String = when (state) {
+        true -> "开启"
+        false -> "关闭"
+        null -> "状态未知"
+    }
+
+    /**
+     * 手电筒没有 shell 命令,走 CameraManager。setTorchMode 不需要 CAMERA 权限,
+     * 但相机正被别的应用占用时会抛 CameraAccessException(由 execute 统一转成 error)。
+     */
+    private fun torchImpl(action: String, ctx: Context?): String {
+        val cm = ctx?.getSystemService(Context.CAMERA_SERVICE) as? android.hardware.camera2.CameraManager
+            ?: return "error: no camera service"
+        val id = cm.cameraIdList.firstOrNull {
+            cm.getCameraCharacteristics(it)
+                .get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+        } ?: return "error: 这台设备没有可用的闪光灯"
+        val cur = torchState(cm, id)
+        val want = when (action) {
+            "status" -> return "手电筒：" + onOff(cur)
+            "on" -> true
+            "off" -> false
+            "toggle" -> cur?.not() ?: return "error: 读不到手电筒当前状态，请让用户明确说打开还是关闭。"
+            else -> return "error: 手电筒只支持 on / off / toggle / status"
+        }
+        cm.setTorchMode(id, want)
+        return if (want) "已打开手电筒" else "已关闭手电筒"
+    }
+
+    /** 手电筒没有同步查询接口,只能注册回调 —— 注册时系统会立刻回报一次当前状态。 */
+    private fun torchState(cm: android.hardware.camera2.CameraManager, id: String): Boolean? {
+        val result = AtomicReference<Boolean?>(null)
+        val latch = CountDownLatch(1)
+        val cb = object : android.hardware.camera2.CameraManager.TorchCallback() {
+            override fun onTorchModeChanged(cameraId: String, enabled: Boolean) {
+                if (cameraId == id) { result.set(enabled); latch.countDown() }
+            }
+            override fun onTorchModeUnavailable(cameraId: String) {
+                // 相机被占用时手电筒不可用,当关着处理
+                if (cameraId == id) { result.set(false); latch.countDown() }
+            }
+        }
+        cm.registerTorchCallback({ it.run() }, cb)
+        try {
+            latch.await(800, TimeUnit.MILLISECONDS)
+        } finally {
+            cm.unregisterTorchCallback(cb)
+        }
+        return result.get()
+    }
+
+    private fun brightnessImpl(action: String, args: JSONObject): String {
+        when (action) {
+            "status" -> return QuickToggle.describeBrightness(
+                sh("settings get system screen_brightness_mode; " +
+                        "settings get system screen_brightness_float; settings get system screen_brightness")
+            )
+            "set" -> {}
+            else -> return "error: 调亮度要用 action=set 加 percent；开关自动亮度用 target=auto_brightness"
+        }
+        if (!args.has("percent")) return "error: 设定亮度需要 percent(0-100)"
+        val pct = args.optInt("percent").coerceIn(0, 100)
+        val linear = String.format(Locale.US, "%.4f", QuickToggle.percentToLinear(pct))
+        // 自动亮度开着时手动设的值会被环境光立刻盖掉,先关
+        val (rc, out) = shRc("settings put system screen_brightness_mode 0; cmd display set-brightness $linear")
+        if (rc != 0 || QuickToggle.looksFailed(out)) {
+            return "error: 设定亮度失败(exit=$rc)：${out.take(300).ifBlank { "无输出" }}"
+        }
+        return "已把亮度调到 $pct%（同时关闭了自动亮度）"
+    }
+
+    /**
+     * 跑命令并带回退出码。开关类命令失败时常常只回一行 usage 或干脆不出声,
+     * 光看输出分不清成败。退出码取的是最后一条命令的。
+     */
+    private fun shRc(command: String): Pair<Int?, String> {
+        val out = sh("$command; echo \"__rc=\$?\"").trimEnd()
+        val m = Regex("__rc=(\\d+)$").find(out) ?: return null to out
+        return m.groupValues[1].toIntOrNull() to out.substring(0, m.range.first).trim()
     }
 
     // ---------------------------------------------------------------- 杂项

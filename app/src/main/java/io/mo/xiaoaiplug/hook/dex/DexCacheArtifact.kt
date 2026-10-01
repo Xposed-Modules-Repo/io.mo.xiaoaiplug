@@ -33,7 +33,7 @@ data class DexCacheArtifact(
     }
 
     companion object {
-        const val SCHEMA_VERSION = 6
+        const val SCHEMA_VERSION = 7
 
         fun decode(text: String?, requireComplete: Boolean = true): DexCacheArtifact? = runCatching {
             if (text.isNullOrBlank()) return null

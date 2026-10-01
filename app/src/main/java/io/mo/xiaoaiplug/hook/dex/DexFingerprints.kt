@@ -157,6 +157,14 @@ object DexFingerprints {
                 .ifEmpty { methods(MethodMatcher.create().name("getFloatManager")) }
                 .mapNotNull { it.returnType?.name }.filter { it.startsWith("com.xiaomi.voiceassistant.") }
         }
+        resolve("settingsSwitchClass") {
+            // SettingsUtil:所有系统开关(手电筒/Wi-Fi/勿扰/蓝牙…)都经 change(Context, String, int) 按名字分派。
+            // change 这个名字没被混淆;手电筒那条分支发 TOGGLE_TORCH 广播,用它把类钉死。
+            classes(ClassMatcher.create().addUsingString("miui.intent.action.TOGGLE_TORCH")
+                .addMethod(MethodMatcher.create().name("change").returnType("boolean")
+                    .addParamType("android.content.Context").addParamType("java.lang.String")
+                    .addParamType("int")))
+        }
         return DexScanResult(TargetSymbols.fromJson(values), states.toMap())
     }
 }

@@ -24,7 +24,8 @@ data class TargetSymbols(
     val chatDbManagerClass: String = "",
     val flowToastCardClass: String = "",
     val flowControllerClass: String = "",
-    val floatManagerClass: String = ""
+    val floatManagerClass: String = "",
+    val settingsSwitchClass: String = ""
 ) {
 
     fun toJson(): JSONObject = JSONObject().apply {
@@ -46,6 +47,7 @@ data class TargetSymbols(
         put("flowToastCardClass", flowToastCardClass)
         put("flowControllerClass", flowControllerClass)
         put("floatManagerClass", floatManagerClass)
+        put("settingsSwitchClass", settingsSwitchClass)
     }
 
     fun getDetailedList(): List<SymbolDetail> = listOf(
@@ -66,7 +68,8 @@ data class TargetSymbols(
         SymbolDetail("chatDbManagerClass", "历史对话数据库", "压制兜底文案并将 AI 答案写回历史对话库", chatDbManagerClass),
         SymbolDetail("flowToastCardClass", "流式结果卡片", "自建或接管的答案上屏 Toast 卡片", flowToastCardClass),
         SymbolDetail("flowControllerClass", "全屏结果流控制器", "全屏主界面卡片渲染容器 (addCard)", flowControllerClass),
-        SymbolDetail("floatManagerClass", "悬浮窗管理器", "悬浮窗模式卡片渲染容器 (addCard)", floatManagerClass)
+        SymbolDetail("floatManagerClass", "悬浮窗管理器", "悬浮窗模式卡片渲染容器 (addCard)", floatManagerClass),
+        SymbolDetail("settingsSwitchClass", "系统开关工具", "拦截接管轮次里小爱自己执行的手电筒 / Wi-Fi / 勿扰等开关 (SettingsUtil.change)", settingsSwitchClass)
     )
 
     companion object {
@@ -90,7 +93,8 @@ data class TargetSymbols(
                 chatDbManagerClass = json.optString("chatDbManagerClass", defaults.chatDbManagerClass),
                 flowToastCardClass = json.optString("flowToastCardClass", defaults.flowToastCardClass),
                 flowControllerClass = json.optString("flowControllerClass", defaults.flowControllerClass),
-                floatManagerClass = json.optString("floatManagerClass", defaults.floatManagerClass)
+                floatManagerClass = json.optString("floatManagerClass", defaults.floatManagerClass),
+                settingsSwitchClass = json.optString("settingsSwitchClass", defaults.settingsSwitchClass)
             )
         }
     }

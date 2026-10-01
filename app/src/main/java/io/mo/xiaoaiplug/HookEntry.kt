@@ -43,6 +43,9 @@ private const val OUR_AUDIO_TRACK = "toastStreamTts"
 // 终态结果(isFinal=true)带着 dialogId 和问话原文。
 private const val ASR_RECOGNIZE_RESULT = "SpeechRecognizer.RecognizeResult"
 
+// 小爱所有指令操作的父类。子类全混淆了,它没有;用来在调用栈里认"这是指令执行"。
+private const val BASE_OPERATION_CLASS = "com.xiaomi.voiceassistant.instruction.base.BaseOperation"
+
 // 念出来的答案上限。模型答案可能很长(还可能夹着工具输出),整段念完既吵又没法打断。
 // 超出部分只截断不摘要 —— 卡片上是全文,想看细节看屏幕。
 private const val MAX_SPEAK_CHARS = 220
@@ -366,6 +369,7 @@ class HookEntry : IXposedHookLoadPackage {
         hookAsrResult(cl)
         hookAgentAction(cl)
         hookIntentLaunch(cl)
+        hookSettingsSwitch(cl)
         hookToastCardBind(cl)
         hookBackgroundAppsNav(cl)
     }
@@ -694,6 +698,83 @@ class HookEntry : IXposedHookLoadPackage {
         }
     }
 
+    /**
+     * 拦小爱自己的系统开关。手电筒 / Wi-Fi / 勿扰 / 蓝牙…都走 SettingsUtil.change(Context, String, int),
+     * 既不经 Intent 启动也不经 Agent Action,前两道拦截都漏了它 —— 真机上"打开手电筒"是小爱先开、
+     * 我们的 quick_toggle 再开一遍(操作类 → s6.change → j7.change → TOGGLE_TORCH 广播)。
+     *
+     * 只在**本轮确实由我们接管**时拦,不沿用 [ownsCurrentTurn] 里的查看类拦截:那种轮次没有接管,
+     * 拦了就谁也不开了。返回 true 冒充成功,免得小爱走"设置失败"的兜底分支。
+     *
+     * 还必须是**指令执行**发起的调用([calledFromOperation]):卡片上的开关按钮走的也是 change,
+     * 真机上接管后几秒内用户点卡片开关被一起拦掉,点了没反应。
+     */
+    private fun hookSettingsSwitch(cl: ClassLoader) {
+        val clazz = try {
+            cl.loadClass(symbols.settingsSwitchClass)
+        } catch (e: Throwable) {
+            Log.i(TAG, "${symbols.settingsSwitchClass} not found: $e")
+            return
+        }
+        for (m in clazz.declaredMethods) {
+            val p = m.parameterTypes
+            if (m.name != "change" || p.size != 3 || p[0] != Context::class.java ||
+                p[1] != String::class.java || p[2] != Integer.TYPE) continue
+            try {
+                XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        try {
+                            if (!takenOverTurnNow()) return
+                            if (!calledFromOperation(cl)) {
+                                Log.i(TAG, "allow native switch ${param.args[1]}=${param.args[2]} (not from an operation)")
+                                return
+                            }
+                            Log.i(TAG, "block native switch ${param.args[1]}=${param.args[2]}: query=\"$lastQueryText\"")
+                            param.result = true
+                        } catch (t: Throwable) {
+                            Log.i(TAG, "settings switch hook error: $t")
+                        }
+                    }
+                })
+                Log.i(TAG, "hooked ${clazz.name}.change")
+            } catch (t: Throwable) {
+                Log.i(TAG, "hook ${clazz.name}.change fail: $t")
+            }
+        }
+    }
+
+    /**
+     * 小爱的开关面板卡(手电筒 / Wi-Fi…下面那张带开关和「设置」的卡)。类名是混淆的,
+     * 但 getCardName() 返回字面量 "SwitchPanelCard",是卡片基类方法的重写,不会被混淆。
+     */
+    private fun isNativeSwitchCard(card: Any): Boolean = runCatching {
+        card.javaClass.getMethod("getCardName").invoke(card) == "SwitchPanelCard"
+    }.getOrDefault(false)
+
+    private val operationFrameCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * 当前调用栈里有没有小爱的指令操作类(BaseOperation 的子类)。指令执行时栈上是
+     * `yg1.x9.p0 → s6.change → j7.change`,用户点卡片开关时没有这一帧。
+     * 子类名是混淆的、跨版本会变,所以按继承关系认,父类名 BaseOperation 没混淆。
+     * 认不出父类时返回 true —— 宁可连点击一起拦,也不能让指令重复执行。
+     */
+    private fun calledFromOperation(cl: ClassLoader): Boolean {
+        val base = try {
+            cl.loadClass(BASE_OPERATION_CLASS)
+        } catch (t: Throwable) {
+            return true
+        }
+        return Thread.currentThread().stackTrace.any { frame ->
+            val name = frame.className
+            if (name.startsWith("java.") || name.startsWith("android.") || name.startsWith("dalvik.") ||
+                name.startsWith("de.robv.") || name.startsWith("io.mo.xiaoaiplug.")) return@any false
+            operationFrameCache.getOrPut(name) {
+                runCatching { base.isAssignableFrom(Class.forName(name, false, cl)) }.getOrDefault(false)
+            }
+        }
+    }
+
     // 这条 Agent Action 该不该拦。判据同 shouldBlockJump:只看这一轮归不归我们,
     // 不看动作打向哪个包。specs 只用来确认"这确实是条动作指令"。
     private fun shouldBlockAgentAction(specs: List<String>): Boolean {
@@ -792,6 +873,17 @@ class HookEntry : IXposedHookLoadPackage {
             takenOver = cfg.enabled && cfg.isUsable && replyTurns.ownsCurrent(),
             skipTakeover = currentQueryTexts().any { isAiTakeoverSkip(it, cfg) },
             blockViewJump = viewBlockCandidateNow(cfg)
+        )
+    }
+
+    /** 同 [ownsCurrentTurn],但只认真正的接管,不含"未接管、仅拦查看类跳转"那种轮次。 */
+    private fun takenOverTurnNow(): Boolean {
+        val cfg = lastConfig ?: return false
+        return NativeActionPolicy.shouldBlock(
+            queryAgeMs = System.currentTimeMillis() - lastQueryTime,
+            takenOver = cfg.enabled && cfg.isUsable && replyTurns.ownsCurrent(),
+            skipTakeover = currentQueryTexts().any { isAiTakeoverSkip(it, cfg) },
+            blockViewJump = false
         )
     }
 
@@ -1088,6 +1180,13 @@ class HookEntry : IXposedHookLoadPackage {
                             // 怀疑它压根没被加进渲染列表。这个 hook 原来是静默的,
                             // "addCard 没被调用"和"调用了但卡没上屏"看不出区别 —— 一轮就几条,打得起。
                             val c = param.args.getOrNull(0)
+                            if (c != null && isNativeSwitchCard(c) && takenOverTurnNow()) {
+                                // 开关已由 quick_toggle 执行,小爱这张开关卡的执行被 hookSettingsSwitch 拦了,
+                                // 留着它只会显示一个和实际状态脱节的开关。
+                                Log.i(TAG, "[sink] drop native switch card on taken-over turn")
+                                param.result = null
+                                return
+                            }
                             if (c != null) {
                                 try {
                                     val replacement = replyCardForSink(cl, c)
