@@ -79,6 +79,10 @@ class ConfigProvider : ContentProvider() {
         //   adb shell content call --uri content://io.mo.xiaoaiplug.config --method ui_dump
         const val METHOD_UI_DUMP = "ui_dump"
         const val METHOD_SEND_MESSAGE = "send_message"
+        // 通用界面操作(ui_observe / ui_act 工具)。**故意不放进 SHELL_ALLOWED_METHODS**:
+        // 它能替用户点任意应用的任意按钮,adb shell 上任何人都不该直接调得到。
+        const val METHOD_UI_OBSERVE = "ui_observe"
+        const val METHOD_UI_ACT = "ui_act"
 
         // 运行记录:hook 在小爱进程里产生记录,数据库在本模块私有目录,同样得过桥。
         // 只有写入需要过桥 —— 「记录」页跟本 provider 同进程,读直接走 LogStore。
@@ -210,6 +214,28 @@ class ConfigProvider : ContentProvider() {
                         }
                     )
                 }
+            }
+            METHOD_UI_OBSERVE, METHOD_UI_ACT -> {
+                val failure = AccessibilityGuard.ensureRunning(context!!, autoFixEnabled())
+                val svc = UiAutoService.instance
+                val result = when {
+                    failure != null -> failure
+                    svc == null -> "error: 无障碍服务刚连上又断了"
+                    else -> try {
+                        if (method == METHOD_UI_OBSERVE) svc.observe()
+                        else svc.act(
+                            action = extras?.getString("action").orEmpty(),
+                            index = extras?.getInt("index", -1) ?: -1,
+                            snapshotId = extras?.getInt("snapshot", -1) ?: -1,
+                            target = extras?.getString("target").orEmpty(),
+                            text = extras?.getString("text").orEmpty(),
+                            direction = extras?.getString("direction").orEmpty()
+                        )
+                    } catch (t: Throwable) {
+                        "error: ${t.javaClass.simpleName}: ${t.message}"
+                    }
+                }
+                Bundle().apply { putString("result", result) }
             }
             METHOD_SEND_MESSAGE -> {
                 val failure = AccessibilityGuard.ensureRunning(context!!, autoFixEnabled())

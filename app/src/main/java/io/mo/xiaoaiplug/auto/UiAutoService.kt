@@ -55,6 +55,9 @@ class UiAutoService : AccessibilityService() {
         const val VOICE_ASSIST = "com.miui.voiceassist"
         const val SELF_PKG = "io.mo.xiaoaiplug"
 
+        /** 一张快照最多列多少个控件。每项约 50 字,80 项正好在工具输出上限(6000 字)以内。 */
+        private const val MAX_UI_ELEMENTS = 80
+
         @Volatile
         var instance: UiAutoService? = null
             private set
@@ -115,14 +118,7 @@ class UiAutoService : AccessibilityService() {
      * 前提:服务作用域必须覆盖目标应用 —— ui_auto_service.xml 已去掉 packageNames 限制、放开到全部应用。
      */
     fun dumpForegroundApp(reveal: Boolean): String {
-        val root = (windows ?: emptyList())
-            .sortedByDescending { it.layer }
-            .mapNotNull { it.root }
-            .firstOrNull {
-                val p = it.packageName?.toString()
-                p != null && p != VOICE_ASSIST && p != SELF_PKG && p != "com.android.systemui"
-            }
-            ?: rootInActiveWindow
+        val root = foregroundRoot()
             ?: return "(no active window; 无障碍服务没连上或当前无窗口)"
         val sb = StringBuilder()
         sb.append("pkg=").append(root.packageName).append('\n')
@@ -232,6 +228,276 @@ class UiAutoService : AccessibilityService() {
     private fun click(node: AccessibilityNodeInfo?): Boolean {
         val target = clickableSelfOrAncestor(node) ?: return false
         return target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    // ------------------------------------------------------------ 通用界面操作(ui_observe / ui_act)
+
+    /** 一次快照:编号 i 对应 nodes[i]。编号只在这一张快照里有效,界面一变就作废。 */
+    private class Snapshot(
+        val id: Int,
+        val pkg: String,
+        val nodes: List<AccessibilityNodeInfo>,
+        val elements: List<UiPolicy.Element>,
+        val truncated: Boolean
+    )
+
+    // observe / act 串行:两个工具调用并行时,别让一个的快照把另一个的编号顶掉。
+    private val uiLock = Any()
+    private var lastSnapshot: Snapshot? = null
+    private var snapshotSeq = 0
+
+    /**
+     * 前台应用窗口的根:跳过小爱的悬浮窗、本模块和 systemui,理由见 [dumpForegroundApp]。
+     * MIUI 的 systemui 插件(`miui.systemui.plugin`,小爱悬浮球就挂在它上面)也得跳:
+     * 真机上坐标点击点到悬浮层后,快照就被它顶成了前台。
+     */
+    private fun foregroundRoot(): AccessibilityNodeInfo? = (windows ?: emptyList())
+        .sortedByDescending { it.layer }
+        .mapNotNull { it.root }
+        .firstOrNull { isAppWindow(it.packageName?.toString()) }
+        ?: rootInActiveWindow
+
+    private fun isAppWindow(p: String?): Boolean =
+        p != null && p != VOICE_ASSIST && p != SELF_PKG &&
+            !p.startsWith("com.android.systemui") && !p.startsWith("miui.systemui")
+
+    /** 小爱的对话窗此刻是否压在最上面(坐标点击会点到它身上)。 */
+    private fun assistantOverlayOnTop(): Boolean =
+        (windows ?: emptyList()).maxByOrNull { it.layer }?.root?.packageName == VOICE_ASSIST
+
+    /**
+     * 控件是否在屏幕上。不能只信 isVisibleToUser:真机上小爱对话窗盖着时,设置页的列表项
+     * 全被报成不可见,快照里只剩一个"可滚动区域",关掉对话窗才恢复。有实际面积就算。
+     */
+    private fun onScreen(n: AccessibilityNodeInfo, r: Rect): Boolean {
+        if (n.isVisibleToUser) return true
+        n.getBoundsInScreen(r)
+        return r.width() > 0 && r.height() > 0 && r.right > 0 && r.bottom > 0
+    }
+
+    fun observe(): String = synchronized(uiLock) {
+        val snap = takeSnapshot() ?: return "error: 拿不到前台窗口，无障碍服务可能没连上"
+        UiPolicy.formatSnapshot(snap.id, snap.pkg, snap.elements, snap.truncated)
+    }
+
+    private fun takeSnapshot(): Snapshot? {
+        val root = foregroundRoot() ?: return null
+        val nodes = ArrayList<AccessibilityNodeInfo>()
+        val elements = ArrayList<UiPolicy.Element>()
+        var truncated = false
+        val bounds = Rect()
+
+        // 可点击容器(列表项、卡片)的文字子节点已经拼进容器的标签里,不再单列;
+        // 但容器里另有可交互的子控件(列表项里的开关)照样列出来。
+        fun visit(n: AccessibilityNodeInfo?, depth: Int, underClickable: Boolean) {
+            if (n == null || depth > 40 || !onScreen(n, bounds)) return
+            if (nodes.size >= MAX_UI_ELEMENTS) { truncated = true; return }
+            val interactive = n.isClickable || n.isEditable || n.isScrollable || n.isCheckable
+            val own = ownText(n)
+            if (interactive || (own.isNotEmpty() && !underClickable)) {
+                nodes.add(n)
+                elements.add(elementOf(n, own))
+            }
+            val clickableContainer = n.isClickable && !n.isScrollable && !n.isEditable
+            for (i in 0 until n.childCount) visit(n.getChild(i), depth + 1, underClickable || clickableContainer)
+        }
+        visit(root, 0, false)
+        val snap = Snapshot(++snapshotSeq, root.packageName?.toString().orEmpty(), nodes, elements, truncated)
+        lastSnapshot = snap
+        return snap
+    }
+
+    private fun ownText(n: AccessibilityNodeInfo): String =
+        (n.text?.toString()?.takeIf { it.isNotBlank() } ?: n.contentDescription?.toString()).orEmpty().trim()
+
+    /** 子孙节点的文字拼起来,给"自己没字的按钮 / 列表项"当标签。 */
+    private fun childText(n: AccessibilityNodeInfo, depth: Int = 0): String {
+        if (depth > 4) return ""
+        val parts = ArrayList<String>()
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            val t = ownText(c)
+            if (t.isNotEmpty()) parts.add(t) else childText(c, depth + 1).takeIf { it.isNotEmpty() }?.let(parts::add)
+            if (parts.sumOf { it.length } > 60) break
+        }
+        return parts.joinToString(" ")
+    }
+
+    private fun elementOf(n: AccessibilityNodeInfo, own: String): UiPolicy.Element {
+        val kind = UiPolicy.kindOf(n.isEditable, n.isCheckable, n.isScrollable, n.isClickable)
+        return when {
+            n.isEditable -> {
+                val hint = n.hintText?.toString().orEmpty()
+                val value = n.text?.toString().orEmpty().takeIf { it != hint }.orEmpty()
+                val label = UiPolicy.cleanLabel(hint.ifBlank { n.contentDescription?.toString() })
+                val state = when {
+                    n.isPassword -> "密码框"
+                    value.isNotBlank() -> "已填: " + UiPolicy.cleanLabel(value, 30)
+                    else -> ""
+                }
+                UiPolicy.Element(kind, label, state)
+            }
+            n.isCheckable -> UiPolicy.Element(kind, UiPolicy.cleanLabel(own.ifEmpty { childText(n) }),
+                if (n.isChecked) "已开" else "已关")
+            // 可滚动区域不拼子项文字:它的子项会各自列出,拼进来只会让"按文字找蓝牙"
+            // 匹配到整块列表(真机上就是这样点到了列表中间、按坐标点在了小爱悬浮层上)。
+            n.isScrollable -> UiPolicy.Element(kind, UiPolicy.cleanLabel(own.ifEmpty { idLabel(n) }))
+            else -> UiPolicy.Element(kind, UiPolicy.cleanLabel(own.ifEmpty { childText(n) }.ifEmpty { idLabel(n) }))
+        }
+    }
+
+    /** 没有任何文字的控件(相册的照片格子之类)退而用资源 id 当标签,至少让模型分得清是什么。 */
+    private fun idLabel(n: AccessibilityNodeInfo): String =
+        n.viewIdResourceName?.substringAfterLast('/')?.let { "#$it" }.orEmpty()
+
+    /**
+     * 执行一个界面动作,返回结果 + 动作后的新快照(省一轮"再看一眼"的模型往返)。
+     *
+     * 定位目标三选一:[index](配 [snapshotId],必须是最新快照)、[target](按标签文字找)、
+     * 都不给时 input 用当前焦点输入框、scroll 用第一个可滚动区域。
+     *
+     * 点击优先走无障碍节点动作 —— 小爱的对话窗是盖在上面的悬浮层,坐标点击会点到它身上;
+     * 节点动作直达目标窗口,不受遮挡。节点不可点时才退回 root 的 input tap。
+     */
+    fun act(action: String, index: Int, snapshotId: Int, target: String, text: String, direction: String): String =
+        synchronized(uiLock) {
+            val t0 = SystemClock.uptimeMillis()
+            val done: String = when (action) {
+                "back" -> { performGlobalAction(GLOBAL_ACTION_BACK); "已按返回键" }
+                "home" -> { performGlobalAction(GLOBAL_ACTION_HOME); "已回到桌面" }
+                "wait" -> {
+                    Thread.sleep(text.toLongOrNull()?.coerceIn(200, 3000) ?: 1000)
+                    "已等待"
+                }
+                "tap", "input", "scroll" -> {
+                    val fgPkg = foregroundRoot()?.packageName?.toString().orEmpty()
+                    if (UiPolicy.isSensitivePackage(fgPkg)) return UiPolicy.sensitiveAppRefusal(fgPkg)
+                    val (node, label) = resolveTarget(action, index, snapshotId, target)
+                        ?: return lastFailure
+                    when (action) {
+                        "tap" -> tapNode(node, label)
+                        "input" -> inputInto(node, text)
+                        else -> scrollNode(node, direction)
+                    } ?: return lastFailure
+                }
+                else -> return "error: 未知动作 \"$action\"，可选 tap / input / scroll / back / home / wait"
+            }
+            settleAfter(t0)
+            val snap = takeSnapshot()
+            done + "\n\n" + (snap?.let { UiPolicy.formatSnapshot(it.id, it.pkg, it.elements, it.truncated) }
+                ?: "(拿不到新界面)")
+        }
+
+    // resolveTarget / tapNode 等失败时把理由放这里,由 act 原样返回(只在 uiLock 内读写)。
+    private var lastFailure = ""
+
+    private fun <T> fail(msg: String): T? {
+        lastFailure = msg
+        return null
+    }
+
+    private fun resolveTarget(
+        action: String, index: Int, snapshotId: Int, target: String
+    ): Pair<AccessibilityNodeInfo, String>? {
+        if (index >= 0) {
+            val snap = lastSnapshot
+            if (snap == null || snap.id != snapshotId) {
+                return fail("error: 快照 #$snapshotId 已过期(最新是 #${snap?.id ?: "无"})，界面可能变了。" +
+                    "请用最新快照里的编号，或先 ui_observe。")
+            }
+            if (index >= snap.nodes.size) return fail("error: 快照 #${snap.id} 里没有编号 $index(共 ${snap.nodes.size} 项)")
+            val node = snap.nodes[index]
+            if (!node.refresh()) return fail("error: 编号 $index 的控件已经不在界面上了，请重新 ui_observe")
+            if (UiPolicy.isSensitivePackage(snap.pkg)) return fail(UiPolicy.sensitiveAppRefusal(snap.pkg))
+            return node to snap.elements[index].label
+        }
+        val snap = takeSnapshot() ?: return fail("error: 拿不到前台窗口")
+        val pool = snap.elements.indices.filter {
+            when (action) {
+                "input" -> snap.nodes[it].isEditable
+                "scroll" -> snap.nodes[it].isScrollable
+                // 按文字点时不考虑可滚动区域:它是容器,点它没有意义
+                else -> !snap.nodes[it].isScrollable
+            }
+        }
+        if (target.isBlank()) {
+            val pick = when (action) {
+                "input" -> pool.firstOrNull { snap.nodes[it].isFocused } ?: pool.singleOrNull()
+                "scroll" -> pool.firstOrNull()
+                else -> null
+            } ?: return fail("error: 没指定目标。请传 index(配 snapshot)或 target 文字。" +
+                if (action == "input" && pool.size > 1) "当前有 ${pool.size} 个输入框。" else "")
+            return snap.nodes[pick] to snap.elements[pick].label
+        }
+        val exact = pool.filter { snap.elements[it].label == target }
+        val hits = exact.ifEmpty { pool.filter { snap.elements[it].label.contains(target, ignoreCase = true) } }
+        return when (hits.size) {
+            0 -> fail("error: 当前界面没找到「$target」。\n\n" +
+                UiPolicy.formatSnapshot(snap.id, snap.pkg, snap.elements, snap.truncated))
+            1 -> snap.nodes[hits[0]] to snap.elements[hits[0]].label
+            else -> fail("error: 「$target」匹配到 ${hits.size} 项，请改用编号：" +
+                hits.take(8).joinToString("；") { "[$it] ${snap.elements[it].label}" } + "(快照 #${snap.id})")
+        }
+    }
+
+    private fun tapNode(node: AccessibilityNodeInfo, label: String): String? {
+        val clickable = clickableSelfOrAncestor(node)
+        // 危险按钮按"真正会被点到的那个控件"的整体文字判:文字子节点自己可能只写着"确认",
+        // 它所在的可点击容器写的才是"确认支付"。
+        val whole = label + " " + clickable?.let { ownText(it) + " " + childText(it) }.orEmpty()
+        if (UiPolicy.isDangerousLabel(whole)) return fail(UiPolicy.dangerousButtonRefusal(label.ifEmpty { whole }))
+        if (clickable != null && clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return "已点击「$label」"
+        // 节点不可点(自绘控件、WebView 里的元素):按坐标点。小爱的对话窗盖着时坐标会点到它身上,
+        // 先按一次 BACK 请它走,轮询等它真的消失(只按一次,理由同 sendWeChat)。
+        if (assistantOverlayOnTop()) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            val deadline = SystemClock.uptimeMillis() + 1500
+            while (assistantOverlayOnTop() && SystemClock.uptimeMillis() < deadline) Thread.sleep(100)
+            if (assistantOverlayOnTop()) return fail("error: 小爱的对话窗盖在屏幕上，坐标点击会点到它，请稍后重试")
+            node.refresh()
+        }
+        val r = Rect()
+        node.getBoundsInScreen(r)
+        if (r.isEmpty) return fail("error: 「$label」既不可点击也拿不到位置")
+        val ok = runCatching {
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "input tap ${r.centerX()} ${r.centerY()}"))
+            p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) && p.exitValue() == 0
+        }.getOrDefault(false)
+        return if (ok) "已按坐标点击「$label」(控件本身不可点，若被悬浮窗挡住可能没点中，请看新快照确认)"
+        else fail("error: 「$label」不可点击，按坐标点击也失败了(需要 root)")
+    }
+
+    private fun inputInto(node: AccessibilityNodeInfo, text: String): String? {
+        val edit = if (node.isEditable) node
+        else findAll(node, limit = 1) { it.isEditable }.firstOrNull() ?: return fail("error: 目标不是输入框")
+        if (edit.isPassword) return fail(UiPolicy.PASSWORD_REFUSAL)
+        edit.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        return if (edit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) "已输入 ${text.length} 个字"
+        else fail("error: 输入失败，这个输入框不接受无障碍输入")
+    }
+
+    private fun scrollNode(node: AccessibilityNodeInfo, direction: String): String? {
+        var n: AccessibilityNodeInfo? = node
+        var hops = 0
+        while (n != null && !n.isScrollable && hops < 8) { n = n.parent; hops++ }
+        val target = n?.takeIf { it.isScrollable } ?: return fail("error: 目标及其上层都不可滚动")
+        val up = direction == "up" || direction == "backward"
+        val action = if (up) AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD else AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        return if (target.performAction(action)) (if (up) "已向上滚动" else "已向下滚动")
+        else fail("error: 滚不动了(可能已到${if (up) "顶" else "底"})")
+    }
+
+    /**
+     * 等动作的结果上屏。**不能用"距上次事件已安静 N ms"直接判** —— 动作之前的旧事件会让它
+     * 当场成立(见 [waitForNode] 上的教训)。先等动作之后出现第一条事件,再等它安静下来。
+     */
+    private fun settleAfter(t0: Long) {
+        val deadline = t0 + 2500
+        while (lastEventAt <= t0 && SystemClock.uptimeMillis() < t0 + 1200) Thread.sleep(50)
+        while (SystemClock.uptimeMillis() - lastEventAt < 300 && SystemClock.uptimeMillis() < deadline) Thread.sleep(50)
     }
 
     /**
