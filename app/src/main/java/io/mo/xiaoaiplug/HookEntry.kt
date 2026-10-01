@@ -2222,11 +2222,11 @@ class HookEntry : IXposedHookLoadPackage {
                 }
                 if (!replyTurns.isCurrent(key)) return@Thread
                 Log.i(TAG, "AI answer ready key=$key: $answer")
-                // 软失败([AiClient.FAILED_ANSWER])要当失败处理,不能缓存也不能记历史。
+                // 软失败([AiClient.isSoftFailure])要当失败处理,不能缓存也不能记历史。
                 // 它是**正常返回**的字符串,不像硬失败会抛异常走下面的 catch,所以得显式认。
                 // 缓存了的后果见 FAILED_ANSWER 的注释:用户重问命中 15 秒缓存,重播失败、
                 // 不重试。记历史的后果是这句废话会跟着进后续几轮的上下文。
-                val failed = answer == AiClient.FAILED_ANSWER
+                val failed = AiClient.isSoftFailure(answer)
                 if (failed) Log.w(TAG, "soft failure, not cached/recorded key=$key")
                 if (!failed) {
                     utteranceAnswers[key] = answer

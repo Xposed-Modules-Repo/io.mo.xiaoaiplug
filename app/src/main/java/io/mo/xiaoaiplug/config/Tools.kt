@@ -110,6 +110,13 @@ object Tools {
     const val RUN_SHELL = "run_shell"
 
     /**
+     * 动作类工具被 allowMutating 闸拦下时,返回串的固定前缀。AiClient 靠它认出"被拦了":
+     * 模型被拦后常换 set_setting → run_shell → launch_app 挨个试,每试一次烧一轮,
+     * 认出来之后下一轮直接要求作答。
+     */
+    const val MUTATING_BLOCKED = "error: 本轮对话由小爱自己处理"
+
+    /**
      * run_shell 执行策略。它是唯一接受**任意命令串**、又以 root 执行的工具,风险面最大 ——
      * 模型自己误判、或被 read_file / 短信 / 屏幕文本里夹带的注入指令诱导,都可能跑出破坏性命令。
      * 这道闸让用户能收窄它。空串 / 旧存档 = [FULL],保持原行为。
@@ -331,8 +338,9 @@ object Tools {
         val mutating = spec.mutatingWhen?.invoke(args) ?: spec.mutating
         if (mutating && !allowMutating) {
             Log.i(TAG, "blocked mutating tool $name (round not ours)")
-            return "error: 本轮对话由小爱自己处理，未被本模块接管，动作类工具已禁用。" +
-                    "请只作答，不要尝试执行任何会改变设备状态的操作。"
+            return MUTATING_BLOCKED + "，未被本模块接管，动作类工具已禁用。" +
+                    "请只作答，不要尝试执行任何会改变设备状态的操作，" +
+                    "也不要换别的工具（包括 run_shell）重试同一个动作。"
         }
         return try {
             spec.handler(args, ctx).take(MAX_TOOL_OUTPUT)

@@ -27,7 +27,16 @@ import java.util.concurrent.TimeUnit
 object AiClient {
 
     private const val TAG = "XiaoAiProbe"
-    private const val MAX_TOOL_ITERATIONS = 6
+    // 轮数上限之外还有时间预算:语音场景真正的约束是用户等多久,不是轮数。
+    // 预算耗尽或到了最后一轮,都改成「强制作答轮」:不许再调工具,只凭已有结果回答。
+    // 早先没有收尾轮,第 6 轮模型还在调工具时前 5 轮查到的东西全部作废,
+    // 用户只听到"工具调用超过上限"。
+    private const val MAX_TOOL_ITERATIONS = 20
+    private const val TOOL_LOOP_BUDGET_MS = 60_000L
+
+    /** 强制作答轮追加在最后一条工具结果后面的提示。 */
+    private const val FORCE_ANSWER_NUDGE =
+        "【系统】不能再调用工具了。请只根据上面已经拿到的结果，直接用口语回答用户；没查到或没做成的部分如实说明。"
 
     private const val ANTHROPIC_VERSION = "2023-06-01"
     // Anthropic 必填。语音助手的答案都很短,4096 够用还留了工具循环的余量。
@@ -73,6 +82,12 @@ object AiClient {
      * 一次偶发抖动看起来就成了稳定故障。
      */
     const val FAILED_ANSWER = "(模型返回了无法解析的工具调用，没有得到答案)"
+
+    /** 强制作答轮模型仍不肯作答时的软失败答案。和 [FAILED_ANSWER] 一样不能缓存、不能记历史。 */
+    const val CAPPED_ANSWER = "(查询步骤太多，没能得出答案)"
+
+    /** 调用方用它认软失败,别各自拿字符串比对。 */
+    fun isSoftFailure(answer: String): Boolean = answer == FAILED_ANSWER || answer == CAPPED_ANSWER
 
     /**
      * 流式显示回调。传了它,每一轮模型调用就走 SSE 流式;不传(null)照旧整包读取。
@@ -184,17 +199,44 @@ object AiClient {
 
         messages.put(JSONObject().put("role", "user").put("content", userText))
 
-        var lastContent = ""
+        val loopStart = System.currentTimeMillis()
+        // 上一轮有动作被 allowMutating 拦下:这轮动不了手,再给工具只会换着法子重试。
+        var actionBlocked = false
         for (iter in 0 until MAX_TOOL_ITERATIONS) {
+            // 第 0 轮还没有任何工具结果,不存在"凭已有结果作答",所以收尾轮最早从第 1 轮起。
+            val forceAnswer = iter > 0 && (
+                actionBlocked ||
+                    iter == MAX_TOOL_ITERATIONS - 1 ||
+                    System.currentTimeMillis() - loopStart > TOOL_LOOP_BUDGET_MS
+                )
+            if (forceAnswer) {
+                Log.i(TAG, "forcing final answer at iter=$iter (blocked=$actionBlocked, " +
+                        "elapsed=${System.currentTimeMillis() - loopStart}ms)")
+                // 提示并进最后一条(工具结果)里,不另起 user 消息 —— Anthropic 那边
+                // 工具结果本身就是 user 消息,再追加一条就成了两条连续 user,有的代理端点不收。
+                val last = messages.getJSONObject(messages.length() - 1)
+                last.put("content", last.optString("content") + "\n\n" + FORCE_ANSWER_NUDGE)
+            }
+
             val modelAt = System.currentTimeMillis()
-            val reply = callModel(config, messages, if (useNative) specs else emptyList(), ctx, sink)
-            steps.add("模型" to System.currentTimeMillis() - modelAt)
+            val reply = callModel(config, messages, if (useNative) specs else emptyList(), ctx, sink, forceAnswer)
+            steps.add((if (forceAnswer) "模型(收尾)" else "模型") to System.currentTimeMillis() - modelAt)
             val responseText = AiResponseText.fromMessage(reply)
             val content = responseText.answer
             if (responseText.thinking.isNotBlank()) sink?.onThinking(responseText.thinking)
-            lastContent = content
 
             val calls = extractCalls(reply, content)
+            if (forceAnswer && calls.isNotEmpty()) {
+                // 端点不认 tool_choice=none 或模型无视提示,仍在调工具:不执行,有正文就用正文。
+                Log.w(TAG, "model still calling tools on final round: ${calls.joinToString { it.name }}")
+                val clean = stripToolTags(content)
+                if (clean.isBlank()) {
+                    sink?.onDiscard()
+                    return CAPPED_ANSWER
+                }
+                sink?.onComplete(clean)
+                return clean
+            }
             if (calls.isEmpty()) {
                 // 没有工具调用 = 最终答案。但要防一种情况:内容里**确实有**工具标记,
                 // 只是方言我们还不认识 —— 那 stripToolTags 之后会所剩无几,
@@ -224,6 +266,7 @@ object AiClient {
                 (if (calls.size == 1) "工具" else "工具×${calls.size}")
                         to System.currentTimeMillis() - toolAt
             )
+            if (results.any { it.startsWith(Tools.MUTATING_BLOCKED) }) actionBlocked = true
 
             if (calls.any { it.id != null }) {
                 // 原生协议:每个调用一条 role=tool 消息
@@ -247,10 +290,9 @@ object AiClient {
                 messages.put(JSONObject().put("role", "user").put("content", sb.toString()))
             }
         }
-        // 超过循环上限:把最后内容去掉标记后返回,避免卡死
-        val capped = stripToolTags(lastContent).ifBlank { "(工具调用超过上限，未得到最终答案)" }
-        sink?.onComplete(capped)
-        return capped
+        // 走不到这里:最后一轮必是强制作答轮,不管模型怎么答都会在循环里 return。
+        sink?.onDiscard()
+        return CAPPED_ANSWER
     }
 
     /** 并行执行本轮所有工具,返回与 calls 同序的结果。 */
@@ -327,8 +369,20 @@ object AiClient {
         messages: JSONArray,
         specs: List<Tools.Spec>,
         ctx: Context?,
-        sink: StreamSink?
+        sink: StreamSink?,
+        forceAnswer: Boolean = false
     ): JSONObject {
+        if (forceAnswer && specs.isNotEmpty()) {
+            // 收尾轮仍要带 tools:Anthropic 历史里有 tool_use 块时请求必须定义 tools。
+            // 用 tool_choice=none 禁止再调。有的兼容端点不认 none 会回 400 ——
+            // 那不代表它不支持原生工具(前几轮刚用过),所以不走下面的降级,退回 auto 只靠提示收尾。
+            try {
+                return request(config, messages, specs, sink, noToolCalls = true)
+            } catch (t: HttpError) {
+                if (t.code != 400) throw t
+                Log.w(TAG, "endpoint rejected tool_choice=none, retrying with auto: ${t.body.take(200)}")
+            }
+        }
         return try {
             request(config, messages, specs, sink)
         } catch (t: HttpError) {
@@ -360,14 +414,15 @@ object AiClient {
         config: AiConfig,
         messages: JSONArray,
         specs: List<Tools.Spec>,
-        sink: StreamSink?
+        sink: StreamSink?,
+        noToolCalls: Boolean = false
     ): JSONObject = when (config.aiProvider.wire) {
         AiProvider.Wire.OPENAI ->
-            if (sink != null) postOpenAiStream(config, messages, specs, sink)
-            else postOpenAi(config, messages, specs)
+            if (sink != null) postOpenAiStream(config, messages, specs, sink, noToolCalls)
+            else postOpenAi(config, messages, specs, noToolCalls)
         AiProvider.Wire.ANTHROPIC ->
-            if (sink != null) postAnthropicStream(config, messages, specs, sink)
-            else postAnthropic(config, messages, specs)
+            if (sink != null) postAnthropicStream(config, messages, specs, sink, noToolCalls)
+            else postAnthropic(config, messages, specs, noToolCalls)
     }
 
     private class HttpError(val code: Int, val body: String) : RuntimeException("HTTP $code: $body")
@@ -376,14 +431,15 @@ object AiClient {
     private fun openAiRequest(
         config: AiConfig,
         messages: JSONArray,
-        specs: List<Tools.Spec>
+        specs: List<Tools.Spec>,
+        noToolCalls: Boolean
     ): Triple<URL, Map<String, String>, JSONObject> {
         val body = JSONObject()
             .put("model", config.effectiveModel)
             .put("messages", messages)
         if (specs.isNotEmpty()) {
             body.put("tools", Tools.toOpenAiSchema(specs))
-            body.put("tool_choice", "auto")
+            body.put("tool_choice", if (noToolCalls) "none" else "auto")
         }
         val base = config.effectiveEndpoint.trimEnd('/')
         val url = URL(if (base.endsWith("/chat/completions")) base else "$base/chat/completions")
@@ -395,9 +451,10 @@ object AiClient {
     private fun postOpenAi(
         config: AiConfig,
         messages: JSONArray,
-        specs: List<Tools.Spec>
+        specs: List<Tools.Spec>,
+        noToolCalls: Boolean
     ): JSONObject {
-        val (url, headers, body) = openAiRequest(config, messages, specs)
+        val (url, headers, body) = openAiRequest(config, messages, specs, noToolCalls)
         return postJson(url, headers, body)
             .getJSONArray("choices")
             .getJSONObject(0)
@@ -413,9 +470,10 @@ object AiClient {
         config: AiConfig,
         messages: JSONArray,
         specs: List<Tools.Spec>,
-        sink: StreamSink
+        sink: StreamSink,
+        noToolCalls: Boolean
     ): JSONObject {
-        val (url, headers, body) = openAiRequest(config, messages, specs)
+        val (url, headers, body) = openAiRequest(config, messages, specs, noToolCalls)
         body.put("stream", true)
 
         val response = OpenAiResponseStream { text ->
@@ -441,9 +499,10 @@ object AiClient {
     private fun postAnthropic(
         config: AiConfig,
         messages: JSONArray,
-        specs: List<Tools.Spec>
+        specs: List<Tools.Spec>,
+        noToolCalls: Boolean
     ): JSONObject {
-        val (url, headers, body) = anthropicRequest(config, messages, specs)
+        val (url, headers, body) = anthropicRequest(config, messages, specs, noToolCalls)
         return anthropicToOpenAi(postJson(url, headers, body))
     }
 
@@ -451,7 +510,8 @@ object AiClient {
     private fun anthropicRequest(
         config: AiConfig,
         messages: JSONArray,
-        specs: List<Tools.Spec>
+        specs: List<Tools.Spec>,
+        noToolCalls: Boolean
     ): Triple<URL, Map<String, String>, JSONObject> {
         val system = StringBuilder()
         val converted = JSONArray()
@@ -491,7 +551,7 @@ object AiClient {
         if (system.isNotEmpty()) body.put("system", system.toString())
         if (specs.isNotEmpty()) {
             body.put("tools", Tools.toAnthropicSchema(specs))
-            body.put("tool_choice", JSONObject().put("type", "auto"))
+            body.put("tool_choice", JSONObject().put("type", if (noToolCalls) "none" else "auto"))
         }
 
         val base = config.effectiveEndpoint.trimEnd('/')
@@ -511,9 +571,10 @@ object AiClient {
         config: AiConfig,
         messages: JSONArray,
         specs: List<Tools.Spec>,
-        sink: StreamSink
+        sink: StreamSink,
+        noToolCalls: Boolean
     ): JSONObject {
-        val (url, headers, body) = anthropicRequest(config, messages, specs)
+        val (url, headers, body) = anthropicRequest(config, messages, specs, noToolCalls)
         body.put("stream", true)
 
         val response = AnthropicResponseStream { text ->
