@@ -12,6 +12,22 @@ class DexCacheArtifactTest {
     })
     private fun artifact() = DexCacheArtifact(identity, complete(), "manual-scan-1")
 
+    @Test fun staleOrMissingHandoffNeedsRescanButPartialDoesNot() {
+        val text = artifact().toJson().toString()
+        assertFalse(DexCacheArtifact.needsRescan(text, identity))
+        // 从没扫过 / 升了 schema / 小爱更新了(身份变了)都要重扫
+        assertTrue(DexCacheArtifact.needsRescan(null, identity))
+        assertTrue(DexCacheArtifact.needsRescan(
+            artifact().toJson().put("schemaVersion", DexCacheArtifact.SCHEMA_VERSION - 1).toString(), identity))
+        assertTrue(DexCacheArtifact.needsRescan(text, identity.copy(version = 124L)))
+        // 同一个 APK 上的部分命中是真实结论,不反复重扫
+        val partial = complete().copy(symbols = complete().symbols.copy(bridgeClass = ""),
+            states = complete().states + ("bridgeClass" to SymbolScan(SymbolState.NOT_FOUND)))
+        assertFalse(DexCacheArtifact.needsRescan(DexCacheArtifact(identity, partial).toJson().toString(), identity))
+        // 读不到小爱 APK 时不瞎扫
+        assertFalse(DexCacheArtifact.needsRescan(null, ApkIdentity("", 0L, 0L, 0L)))
+    }
+
     @Test fun completeScanRoundTripsIncludingProvenance() {
         val original = artifact().copy(scan = complete().copy(symbols = complete().symbols.copy(
             ttsBridgeClass = "com.xiaomi.voiceassistant.NewTts",

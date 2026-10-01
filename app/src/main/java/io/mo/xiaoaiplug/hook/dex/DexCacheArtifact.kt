@@ -35,6 +35,19 @@ data class DexCacheArtifact(
     companion object {
         const val SCHEMA_VERSION = 7
 
+        /**
+         * 模块交给小爱的扫描结果还能不能用。小爱进程里加载不了 libdexkit,自己扫必然失败,
+         * 所以这份结果失效(升了 [SCHEMA_VERSION]、小爱更新了、或从没扫过)= 插件整体停用。
+         * 模块 App 启动时用它判断要不要自动重扫。
+         *
+         * 部分命中的结果**不算**失效:那是同一个 APK 上扫过的真实结论,重扫也还是那样,
+         * 当失效处理只会让每次打开应用都白扫一遍。
+         */
+        fun needsRescan(staged: String?, current: ApkIdentity): Boolean {
+            if (!current.valid) return false
+            return decode(staged, requireComplete = false)?.identity != current
+        }
+
         fun decode(text: String?, requireComplete: Boolean = true): DexCacheArtifact? = runCatching {
             if (text.isNullOrBlank()) return null
             val json = JSONObject(text)

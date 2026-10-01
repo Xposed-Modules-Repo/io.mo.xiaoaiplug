@@ -72,7 +72,14 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Scan in the module and publish a validated result for the host's next startup. */
-    fun rescanDexSymbols() {
+    fun rescanDexSymbols() = rescanDexSymbols(auto = false)
+
+    /**
+     * [auto] = 打开应用时发现交给小爱的扫描结果已失效(见 DexCacheArtifact.needsRescan),
+     * 不等用户手动点就重扫。小爱进程里扫不了,不重扫的话插件整体停用 ——
+     * 升 SCHEMA_VERSION 或小爱更新后,用户只会看到"什么都不灵了"。
+     */
+    private fun rescanDexSymbols(auto: Boolean) {
         if (_isScanningDex.value) return
         _isScanningDex.value = true
         viewModelScope.launch {
@@ -82,25 +89,39 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                     val pi = app.packageManager.getPackageInfo("com.miui.voiceassist", 0)
                     val apkPath = pi.applicationInfo?.sourceDir
                         ?: return@withContext "未找到小爱 APK"
+                    if (auto) {
+                        val apk = java.io.File(apkPath)
+                        val current = io.mo.xiaoaiplug.hook.dex.ApkIdentity(
+                            apk.absolutePath, pi.longVersionCode, apk.lastModified(), apk.length()
+                        )
+                        val staged = io.mo.xiaoaiplug.config.ConfigClient.readDexArtifact(app)
+                        if (!io.mo.xiaoaiplug.hook.dex.DexCacheArtifact.needsRescan(staged, current)) {
+                            return@withContext null
+                        }
+                        android.util.Log.i("XiaoAiProbe", "dex handoff stale, auto rescanning")
+                    }
                     val result = io.mo.xiaoaiplug.hook.dex.DexAdapter.forceRescan(
                         apkPath, app.cacheDir, pi.longVersionCode
                     )
                     val reported = io.mo.xiaoaiplug.config.ConfigClient.reportDexSymbols(
                         app, result, "v${pi.longVersionCode}", manual = true
                     )
-                    when {
+                    val prefix = if (auto) "符号缓存已失效，已自动重扫：" else ""
+                    prefix + when {
                         !reported -> "扫描结果保存失败，请重试"
                         result.scan.cacheable -> "扫描完成，请重启小爱以加载新符号"
                         else -> result.scan.summary + "；请重启小爱应用停用状态"
                     }
                 }
+                if (message == null) return@launch
                 refreshStatus()
                 showToast(message)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (t: Exception) {
-                android.util.Log.e("XiaoAiProbe", "Manual dex rescan failed", t)
-                showToast("未找到小爱 APK 或扫描失败")
+                android.util.Log.e("XiaoAiProbe", "Dex rescan failed (auto=$auto)", t)
+                // 自动检查失败(比如没装小爱)不打扰用户,手动点的才提示
+                if (!auto) showToast("未找到小爱 APK 或扫描失败")
             } finally {
                 _isScanningDex.value = false
             }
@@ -143,6 +164,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
     init {
         refreshStatus()
         autoRepairOnLaunch()
+        rescanDexSymbols(auto = true)
     }
 
     /**
