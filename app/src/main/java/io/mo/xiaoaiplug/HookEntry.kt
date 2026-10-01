@@ -11,6 +11,8 @@ import io.mo.xiaoaiplug.config.ConfigClient
 import io.mo.xiaoaiplug.hook.SettingsHook
 import io.mo.xiaoaiplug.hook.ReplyTurns
 import io.mo.xiaoaiplug.hook.ReplyCards
+import io.mo.xiaoaiplug.hook.ReplyPresentation
+import io.mo.xiaoaiplug.hook.ReplyTextRenderer
 import io.mo.xiaoaiplug.hook.NativeActionPolicy
 import io.mo.xiaoaiplug.hook.dex.DexAdapter
 import io.mo.xiaoaiplug.hook.dex.TargetSymbols
@@ -251,12 +253,13 @@ class HookEntry : IXposedHookLoadPackage {
     // FlowTemplateToastCard.bindView 绑定视图时,我们要在那一刻把 toastTv 强制填上并设为可见 ——
     // 光靠构造函数传文本不够,实测占位卡 bindView 跑了但屏幕上全程空白。
     private val ourCardTexts = ConcurrentHashMap<Int, String>()
-
-    private val THINKING_PLACEHOLDER = "🤖 正在思考…"
+    // 旧卡片重新绑定时，仍保留它自己的思考内容和展开状态。
+    private val cardPresentations = java.util.Collections.synchronizedMap(
+        java.util.WeakHashMap<Any, ReplyPresentation>())
 
     // 流式显示:两次卡片刷新之间的最小间隔,免得每个 token 都 post 一次主线程把 UI 打爆。
     private val STREAM_RENDER_INTERVAL_MS = 60L
-    @Volatile private var lastStreamRenderAt = 0L
+    @Volatile private var activeReplyPresentation: Pair<String, ReplyPresentation>? = null
 
     // 历史库改写:拦下小爱自己那句兜底文案,等我们的答案到了再写进去。
     // 实测一次交互里 recordToSpeak 会被连调十来次(同一句插了 11 行),所以压制按对话维度
@@ -508,6 +511,7 @@ class HookEntry : IXposedHookLoadPackage {
                         val turn = replyTurns.capture(dialogId, text, asr = true)
                         if (!replyTurns.isCurrent(turn.key)) return
                         if (turn.key != previousKey) {
+                            cancelReplyPresentation(previousKey)
                             stopMutePump()
                             if (wasOurs) stopOurTts()
                         }
@@ -1167,9 +1171,10 @@ class HookEntry : IXposedHookLoadPackage {
     private fun nativeReplyCard(cl: ClassLoader, key: String, dialogId: String, position: Int = 0): Any =
         replyCards.getOrCreate(key) {
             val type = cl.loadClass(symbols.flowToastCardClass)
-            val text = utteranceAnswers[key] ?: sessionOrNull(dialogId)?.aiAnswer ?: THINKING_PLACEHOLDER
-            val card = type.getConstructor(Integer.TYPE, String::class.java).newInstance(position, text)
+            val text = replyDisplayText(key, utteranceAnswers[key] ?: sessionOrNull(dialogId)?.aiAnswer)
+            val card = type.getConstructor(Integer.TYPE, String::class.java).newInstance(position, cardModelText(text))
             type.getMethod("setDialogId", String::class.java).invoke(card, dialogId)
+            activeReplyPresentation?.takeIf { it.first == key }?.second?.let { cardPresentations[card] = it }
             ourCardTexts[System.identityHashCode(card)] = text
             Log.i(TAG, "[reply-ui] created key=$key card@${System.identityHashCode(card)}")
             card
@@ -1186,9 +1191,9 @@ class HookEntry : IXposedHookLoadPackage {
                 val s = session(dialogId)
                 s.answerCard = WeakReference(card)
                 s.pendingViewAnswer = true
-                val text = s.aiAnswer ?: utteranceAnswers[key] ?: THINKING_PLACEHOLDER
+                val text = replyDisplayText(key, s.aiAnswer ?: utteranceAnswers[key])
                 ourCardTexts[System.identityHashCode(card)] = text
-                card.javaClass.getMethod("updateCardText", String::class.java).invoke(card, text)
+                card.javaClass.getMethod("updateCardText", String::class.java).invoke(card, cardModelText(text))
                 // 卡片经过 r1 -> t0 两层路由不代表换了容器。已添加的对象不再重复 addCard。
                 if (cardSinks[card]?.get() == null) {
                     val sink = activeCardSink?.get() ?: resolveFloatManager() ?: return@post
@@ -1287,11 +1292,13 @@ class HookEntry : IXposedHookLoadPackage {
             Log.i(TAG, "skip non-updatable card@$hash class=${card.javaClass.name}")
             return false
         }
-        val text = sessionOrNull(did)?.aiAnswer ?: THINKING_PLACEHOLDER
+        val text = replyDisplayText(replyTurns.keyFor(did).orEmpty(), sessionOrNull(did)?.aiAnswer)
+        activeReplyPresentation?.takeIf { it.first == replyTurns.keyFor(did) }?.second
+            ?.let { cardPresentations[card] = it }
         session(did).answerCard = WeakReference(card)
         ourCardTexts[hash] = text
         try {
-            updater.invoke(card, text)
+            updater.invoke(card, cardModelText(text))
         } catch (t: Throwable) {
             Log.i(TAG, "commandeer: updateCardText failed: $t")
         }
@@ -1356,7 +1363,19 @@ class HookEntry : IXposedHookLoadPackage {
                 return
             }
             tv.visibility = android.view.View.VISIBLE
-            tv.text = text
+            val presentation = cardPresentations[card]
+                ?: activeReplyPresentation?.takeIf { it.first == replyCards.keyFor(card) }?.second
+                    ?.also { cardPresentations[card] = it }
+            if (presentation == null) {
+                ReplyTextRenderer.render(tv, ReplyPresentation.Display(text)) {}
+            } else {
+                ReplyTextRenderer.render(tv, presentation.display("")) {
+                    // 点击只更新这张卡片；不受当前轮判断或流式节流影响。
+                    presentation.toggleThinking()
+                    val updated = presentation.text("")
+                    forceShowToastViewHolder(card, updated)
+                }
+            }
             Log.i(TAG, "forceShow: card@${System.identityHashCode(card)} tv set," +
                     " vis=${tv.visibility} h=${tv.height} parentVis=${(tv.parent as? android.view.View)?.visibility}")
         } catch (t: Throwable) {
@@ -1534,6 +1553,7 @@ class HookEntry : IXposedHookLoadPackage {
                     val turn = replyTurns.capture(dialogId, queryText, asr = false)
                     if (!replyTurns.isCurrent(turn.key)) return
                     if (previousKey != turn.key) {
+                        cancelReplyPresentation(previousKey)
                         stopMutePump()
                         if (wasOurs) stopOurTts()
                         lastAsrText = ""
@@ -2082,24 +2102,62 @@ class HookEntry : IXposedHookLoadPackage {
     // 只驱动「显示」:把模型正文的增量推到这次问话名下已存在的答案卡,做打字机效果。
     // TTS 不受影响,仍是拿到全文后整串播(speakAnswer)。当前没有卡片就静默丢弃 ——
     // 最终答案由原有的 applyAnswer 路径兜底,流式纯属锦上添花,不承担正确性。
-    private fun streamSinkFor(key: String) = object : AiClient.StreamSink {
-        override fun onDelta(text: String) {
-            // 文本约定降级时,工具轮的 <tool_call> 残渣别上屏;节流,避免主线程被 token 刷爆。
-            if (text.isBlank() || text.contains("<tool_call")) return
-            val now = System.currentTimeMillis()
-            if (now - lastStreamRenderAt < STREAM_RENDER_INTERVAL_MS) return
-            lastStreamRenderAt = now
-            pushStreamingText(key, text)
+    private fun replyDisplayText(key: String, answer: String? = null): String {
+        val fallback = answer.orEmpty()
+        return activeReplyPresentation?.takeIf { it.first == key }?.second?.text(fallback) ?: fallback
+    }
+
+    // 空串会使原生 bindView 提前返回、跳过重播等初始化；模型层用不可见字符撑过此分支，
+    // 实际 TextView 仍显示空串/原生思考组件。它不进入语音、日志或问答历史。
+    private fun cardModelText(text: String): String = text.ifEmpty { "\u200B" }
+
+    private fun cancelReplyPresentation(key: String?) {
+        val presentation = activeReplyPresentation?.takeIf { it.first == key }?.second ?: return
+        presentation.onCancel()
+        val card = key?.let(replyCards::get) ?: return
+        Handler(Looper.getMainLooper()).post {
+            forceShowToastViewHolder(card, presentation.text(""))
         }
-        override fun onComplete(text: String) {
-            // 定稿:不节流,保证卡片停在完整答案上(节流可能吞掉了最后一帧)。
-            lastStreamRenderAt = 0L
-            if (text.isNotBlank()) pushStreamingText(key, text)
+    }
+
+    private fun streamSinkFor(key: String, showThinking: Boolean): AiClient.StreamSink {
+        val presentation = ReplyPresentation(showThinking)
+        synchronized(replyTurns) {
+            if (replyTurns.isCurrent(key)) activeReplyPresentation = key to presentation
         }
-        override fun onDiscard() {
-            // 这轮是工具调用:把乐观推上去的正文撤回占位,等下一轮真答案。
-            lastStreamRenderAt = 0L
-            pushStreamingText(key, THINKING_PLACEHOLDER)
+        // 占位卡可能早于请求创建且尚未绑定视图；先关联状态，迟到绑定也能折叠/展开。
+        replyCards.get(key)?.let { cardPresentations[it] = presentation }
+        pushStreamingText(key, presentation.text(""))
+        return object : AiClient.StreamSink {
+            private var lastRenderAt = 0L
+
+            private fun render(force: Boolean = false) {
+                if (!replyTurns.isCurrent(key)) return
+                val now = System.currentTimeMillis()
+                if (!force && now - lastRenderAt < STREAM_RENDER_INTERVAL_MS) return
+                lastRenderAt = now
+                pushStreamingText(key, presentation.text(""))
+            }
+
+            override fun onThinking(text: String) {
+                if (!showThinking) return
+                presentation.onThinking(text)
+                render()
+            }
+            override fun onDelta(text: String) {
+                // 工具标记不进正文；即使节流跳帧，也保留最新状态供迟到的卡片读取。
+                if (text.isBlank() || text.contains("<tool_call")) return
+                presentation.onAnswer(text)
+                render()
+            }
+            override fun onComplete(text: String) {
+                presentation.onComplete(text)
+                render(force = true)
+            }
+            override fun onDiscard() {
+                presentation.onDiscard()
+                render(force = true)
+            }
         }
     }
 
@@ -2111,7 +2169,7 @@ class HookEntry : IXposedHookLoadPackage {
             if (!replyTurns.isCurrent(key)) return@post
             try {
                 ourCardTexts[System.identityHashCode(card)] = text
-                card.javaClass.getMethod("updateCardText", String::class.java).invoke(card, text)
+                card.javaClass.getMethod("updateCardText", String::class.java).invoke(card, cardModelText(text))
                 forceShowToastViewHolder(card, text)
             } catch (t: Throwable) { Log.w(TAG, "[reply-ui] streaming update failed: $t") }
         }
@@ -2158,7 +2216,7 @@ class HookEntry : IXposedHookLoadPackage {
                 // 流式已重开:此前工具全挂是因为 arguments/name 的 JSON null 被 optString 拼成
                 // 字面量 "null" 毁了参数(已加 isNull 防护)。带着调试日志一起放出去,真机核对。
                 val answer = AiClient.chat(
-                    config, queryText, currentApplicationContext(), history, streamSinkFor(key)
+                    config, queryText, currentApplicationContext(), history, streamSinkFor(key, config.showThinking)
                 ) {
                     replyTurns.isCurrent(key) && utteranceDialogs[key].orEmpty().any { isOurs(it) }
                 }
@@ -2198,6 +2256,7 @@ class HookEntry : IXposedHookLoadPackage {
     private fun applyAnswer(key: String, dialogId: String, answer: String) {
         if (!replyTurns.isCurrent(key)) return
         try {
+            activeReplyPresentation?.takeIf { it.first == key }?.second?.onComplete(answer)
             session(dialogId).aiAnswer = answer
             targetClassLoader?.let { syncSpeakContent(it, dialogId, toSpeakable(answer)) }
             // 替换回答统一由原生文字卡显示，RN 的计算器/业务页面不承担聊天文字渲染。

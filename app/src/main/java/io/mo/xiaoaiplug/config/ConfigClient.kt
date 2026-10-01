@@ -44,7 +44,9 @@ data class AiConfig(
     // **默认关**:它要动系统设置、要 root,不该在用户没点头之前就自己开着。
     val autoFixAccessibility: Boolean = false,
     // MCP 服务列表 JSON 字符串
-    val mcpServersRaw: String = ""
+    val mcpServersRaw: String = "",
+    // 只显示接口返回的思考内容，不启用模型的思考模式；默认关闭。
+    val showThinking: Boolean = false
 ) {
     /** 解析后的 MCP 服务配置列表 */
     val mcpServers: List<McpServerConfig> get() = McpServerConfig.parseList(mcpServersRaw)
@@ -148,7 +150,8 @@ object ConfigClient {
             skipTakeoverPattern = result?.getString(ConfigKeys.SKIP_TAKEOVER_PATTERN).orEmpty(),
             // 注意这里不是「空即开」—— 默认关，只有显式存过 "true" 才算开。
             autoFixAccessibility = autoFixRaw == "true",
-            mcpServersRaw = result?.getString(ConfigKeys.MCP_SERVERS).orEmpty()
+            mcpServersRaw = result?.getString(ConfigKeys.MCP_SERVERS).orEmpty(),
+            showThinking = result?.getString(ConfigKeys.SHOW_THINKING) == "true"
         )
     }
 
@@ -166,6 +169,7 @@ object ConfigClient {
             putString(ConfigKeys.BLOCK_WEB_SEARCH, config.blockWebSearch.toString())
             putString(ConfigKeys.WEB_SEARCH_ALLOW_WORDS, config.webSearchAllowWords)
             putString(ConfigKeys.SPEAK_ANSWER, config.speakAnswer.toString())
+            putString(ConfigKeys.SHOW_THINKING, config.showThinking.toString())
             putString(ConfigKeys.ENABLED_TOOLS, config.enabledTools)
             putString(ConfigKeys.SHELL_POLICY, config.shellPolicy)
             putString(ConfigKeys.USE_NATIVE_TOOLS, config.useNativeTools.toString())

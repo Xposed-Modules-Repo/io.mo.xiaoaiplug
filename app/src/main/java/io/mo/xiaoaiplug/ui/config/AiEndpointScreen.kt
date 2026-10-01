@@ -141,6 +141,24 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
             }
         }
 
+        item { SmallTitle("回复显示") }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                SwitchPreference(
+                    checked = config.showThinking,
+                    onCheckedChange = { on -> vm.update { it.copy(showThinking = on) } },
+                    title = "显示思考过程",
+                    summary = "思考区域默认展开，内容可上下滑动，点击标题可收起"
+                )
+                Text(
+                    text = "需要模型和接口提供思考内容；此开关只控制显示。语音只播报最终答案。",
+                    fontSize = MiuixTheme.textStyles.footnote2.fontSize,
+                    color = MiuixTheme.colorScheme.onBackgroundVariant,
+                    modifier = Modifier.padding(horizontal = CardHorizontalPadding, vertical = 8.dp)
+                )
+            }
+        }
+
         item { SmallTitle("对话上下文") }
         item {
             Card(Modifier.fillMaxWidth()) {

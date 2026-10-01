@@ -29,6 +29,7 @@ object ConfigKeys {
 
     // 用小爱自己的 TTS 把我们的答案念出来(否则它只出卡片、全程沉默)
     const val SPEAK_ANSWER = "speak_answer"
+    const val SHOW_THINKING = "show_thinking"
 
     // 允许模型调用的工具名,逗号分隔。空串 = 全开。
     const val ENABLED_TOOLS = "enabled_tools"
@@ -54,7 +55,7 @@ object ConfigKeys {
         PROVIDER, ENDPOINT, API_KEY, MODEL, SYSTEM_PROMPT, ENABLED,
         BLOCK_VIEW_JUMP, JUMP_ALLOW_WORDS,
         BLOCK_WEB_SEARCH, WEB_SEARCH_ALLOW_WORDS,
-        SPEAK_ANSWER,
+        SPEAK_ANSWER, SHOW_THINKING,
         ENABLED_TOOLS, SHELL_POLICY, USE_NATIVE_TOOLS, CONTEXT_ENABLED,
         SKIP_TAKEOVER_ENABLED, SKIP_TAKEOVER_PATTERN,
         AUTO_FIX_ACCESSIBILITY,
