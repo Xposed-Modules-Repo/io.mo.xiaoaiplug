@@ -29,8 +29,21 @@ android {
         }
     }
 
+    // CI(.github/workflows/build-release.yml)通过环境变量注入正式签名;
+    // 本地没设这些变量时不建 signingConfig,继续走 Android Studio 的签名向导。
+    val ciKeystore = System.getenv("SIGNING_KEYSTORE_FILE")
+    val ciSigning = ciKeystore?.takeIf { file(it).exists() }?.let { path ->
+        signingConfigs.create("ci") {
+            storeFile = file(path)
+            storePassword = System.getenv("SIGNING_STORE_PASSWORD")
+            keyAlias = System.getenv("SIGNING_KEY_ALIAS")
+            keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+        }
+    }
+
     buildTypes {
         release {
+            ciSigning?.let { signingConfig = it }
             // Compose + miuix 全家桶不裁剪的话 dex 有 36MB,包体 23.8MB。
             // 开 R8 之后绝大部分是没用到的库代码(尤其 miuix.icons 那几千个图标常量)。
             // 注意:模块入口和 ModuleStatus 必须有 keep 规则,见 proguard-rules.pro。
