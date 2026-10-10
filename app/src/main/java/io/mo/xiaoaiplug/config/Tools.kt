@@ -46,7 +46,9 @@ object Tools {
         val type: String,          // string / integer / boolean
         val description: String,
         val required: Boolean = false,
-        val enum: List<String>? = null
+        val enum: List<String>? = null,
+        /** 原样下发的 JSON Schema(MCP 工具用:保留 items / 嵌套 properties 等，内置工具不需要) */
+        val schema: JSONObject? = null
     )
 
     /**
@@ -150,7 +152,9 @@ object Tools {
 
     /** 将 MCP 远程工具转换为本模块的 Spec */
     fun mcpToolToSpec(tool: McpTool, server: McpServerConfig): Spec {
+        // 中文服务名会被洗成一串下划线，两个服务就撞名了 —— 那种情况退回用 id 前缀
         val sanitizedServer = server.name.replace(Regex("[^a-zA-Z0-9_]"), "_").lowercase()
+            .takeIf { it.any(Char::isLetterOrDigit) } ?: server.id.filter(Char::isLetterOrDigit).take(8)
         val sanitizedTool = tool.name.replace(Regex("[^a-zA-Z0-9_]"), "_")
         val specName = "mcp_${sanitizedServer}_$sanitizedTool".take(64)
 
@@ -165,14 +169,10 @@ object Tools {
         }
         if (props != null) {
             for (k in props.keys()) {
-                val pObj = props.getJSONObject(k)
+                val pObj = props.optJSONObject(k) ?: JSONObject()
                 val type = pObj.optString("type", "string")
                 val desc = pObj.optString("description", "")
-                val enumArr = pObj.optJSONArray("enum")
-                val enumList = if (enumArr != null) {
-                    List(enumArr.length()) { enumArr.getString(it) }
-                } else null
-                params.add(Param(k, type, desc, k in requiredSet, enumList))
+                params.add(Param(k, type, desc, k in requiredSet, schema = pObj.takeIf { it.length() > 0 }))
             }
         }
 
@@ -245,7 +245,8 @@ object Tools {
         val props = JSONObject()
         val required = JSONArray()
         for (p in s.params) {
-            val po = JSONObject().put("type", p.type).put("description", p.description)
+            val po = p.schema?.let { JSONObject(it.toString()) }
+                ?: JSONObject().put("type", p.type).put("description", p.description)
             p.enum?.let { po.put("enum", JSONArray(it)) }
             props.put(p.name, po)
             if (p.required) required.put(p.name)
