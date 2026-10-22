@@ -83,9 +83,11 @@ fun McpScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
     }
 
     fun deleteServer(id: String) {
-        val list = servers.filterNot { it.id == id }
         McpClient.clearCache(id)
-        vm.update { it.copy(mcpServersRaw = McpServerConfig.toJsonArray(list)) }
+        // 从最新配置里删,不用这一帧捕获的 servers:确认弹窗点下去时可能已经隔了几次改动
+        vm.update { c ->
+            c.copy(mcpServersRaw = McpServerConfig.toJsonArray(c.mcpServers.filterNot { it.id == id }))
+        }
     }
 
     fun toggleServer(server: McpServerConfig, enabled: Boolean) {
@@ -159,7 +161,14 @@ fun McpScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                         isCreating = false
                         editingServer = server
                     },
-                    onDelete = { deleteServer(server.id) },
+                    onDelete = {
+                        // 地址和请求头里的 token 一起删掉,没有撤销,先问一句
+                        vm.requestConfirm(
+                            title = "删除 MCP 服务？",
+                            message = "「${server.name.ifBlank { "未命名 MCP 服务" }}」的地址和请求头会一起删除，且无法恢复。",
+                            confirmLabel = "删除"
+                        ) { deleteServer(server.id) }
+                    },
                     onViewTools = { viewingToolsServer = server }
                 )
                 Spacer(Modifier.height(8.dp))

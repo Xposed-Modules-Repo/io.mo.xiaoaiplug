@@ -90,6 +90,82 @@ object AiClient {
     fun isSoftFailure(answer: String): Boolean = answer == FAILED_ANSWER || answer == CAPPED_ANSWER
 
     /**
+     * 硬失败([chat] 抛异常)时念给用户、写进卡片的那句话。
+     *
+     * 早先这里一律用 [FAILED_ANSWER]:Key 填错、断网、额度用完,用户听到的都是
+     * "模型返回了无法解析的工具调用" —— 只会去怀疑模型,完全找错了排查方向。
+     * 这里只说原因和下一步,不带 HTTP 码这类技术细节(那些在记录页和测试连接里看)。
+     */
+    fun failureAnswer(t: Throwable): String {
+        val f = classifyFailure(t)
+        return "(请求失败：${f.reason}，${f.hint})"
+    }
+
+    /** 「测试连接」用:同一个原因,后面带上 HTTP 码和服务商的原话,方便对着排查。 */
+    fun failureDetail(t: Throwable): String {
+        val f = classifyFailure(t)
+        return if (f.detail.isBlank()) f.reason else "${f.reason}（${f.detail}）"
+    }
+
+    private class Failure(val reason: String, val hint: String, val detail: String)
+
+    private const val HINT_CONFIG = "请到模块里检查配置"
+    private const val HINT_RETRY = "请稍后再试"
+
+    /** 沿 cause 链找第一个认得的异常 —— 有的调用方会把网络异常再包一层。 */
+    private fun classifyFailure(t: Throwable): Failure {
+        var e: Throwable? = t
+        while (e != null) {
+            val name = e.javaClass.simpleName
+            when (e) {
+                is HttpError -> return httpFailure(e)
+                is java.net.SocketTimeoutException -> return Failure("连接模型服务超时", HINT_RETRY, name)
+                is java.net.UnknownHostException -> return Failure("找不到服务器", "请检查网络和接口地址", name)
+                is java.net.ConnectException, is java.net.NoRouteToHostException ->
+                    return Failure("连不上模型服务", "请检查网络和接口地址", name)
+                is javax.net.ssl.SSLException -> return Failure("安全连接失败", HINT_CONFIG, name)
+                is java.net.MalformedURLException -> return Failure("接口地址格式不对", HINT_CONFIG, name)
+                is org.json.JSONException -> return Failure("服务商返回的内容无法解析", HINT_CONFIG, name)
+                is java.io.IOException -> return Failure("网络请求失败", HINT_RETRY, name)
+            }
+            val next = e.cause
+            e = if (next === e) null else next
+        }
+        return Failure("出现意外错误", HINT_RETRY, t.javaClass.simpleName)
+    }
+
+    private fun httpFailure(e: HttpError): Failure {
+        val (reason, hint) = when (e.code) {
+            400 -> "请求被服务商拒绝，可能是模型名不对" to HINT_CONFIG
+            401 -> "API Key 无效或已过期" to HINT_CONFIG
+            402 -> "账户余额不足" to HINT_CONFIG
+            403 -> "API Key 没有权限使用这个模型" to HINT_CONFIG
+            404 -> "接口地址或模型名不对" to HINT_CONFIG
+            408, 504, 524 -> "服务商响应超时" to HINT_RETRY
+            429 -> "请求太频繁或额度已用完" to HINT_RETRY
+            in 500..599 -> "服务商暂时出错" to HINT_RETRY
+            else -> "服务商返回错误" to HINT_RETRY
+        }
+        val said = serverMessage(e.body)
+        return Failure(reason, hint, if (said.isBlank()) "HTTP ${e.code}" else "HTTP ${e.code}：$said")
+    }
+
+    /**
+     * 从错误响应里捞服务商的原话。OpenAI 兼容是 `{"error":{"message":…}}`,
+     * Anthropic 是 `{"type":"error","error":{"message":…}}`,也有直接 `{"message":…}` 的。
+     * 不是 JSON(比如网关吐的 HTML 404 页)就不展示,一屏标签没有参考价值。
+     */
+    private fun serverMessage(body: String): String {
+        val text = body.trim()
+        if (!text.startsWith("{")) return ""
+        val json = try { JSONObject(text) } catch (t: Throwable) { return "" }
+        val msg = json.optJSONObject("error")?.optString("message").orEmpty()
+            .ifBlank { json.optString("message") }
+            .ifBlank { json.optString("error") }
+        return msg.trim().take(160)
+    }
+
+    /**
      * 流式显示回调。传了它,每一轮模型调用就走 SSE 流式;不传(null)照旧整包读取。
      *
      * 只服务「显示」—— TTS 仍是拿到全文后整串播。工具循环一份代码通吃:流式重组出来的
@@ -141,7 +217,7 @@ object AiClient {
         } catch (t: Throwable) {
             LogClient.error(
                 ctx,
-                "对话失败: ${t.javaClass.simpleName}",
+                "对话失败: ${failureDetail(t)}",
                 "问: $userText\n\n${t.stackTraceToString()}",
                 System.currentTimeMillis() - started
             )

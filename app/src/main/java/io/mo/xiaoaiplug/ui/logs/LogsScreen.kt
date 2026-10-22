@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.mo.xiaoaiplug.config.LogEntry
+import io.mo.xiaoaiplug.ui.ConfigViewModel
 import io.mo.xiaoaiplug.ui.LogsViewModel
 import io.mo.xiaoaiplug.ui.nav.CardContentPadding
 import io.mo.xiaoaiplug.ui.nav.PageScaffold
@@ -57,7 +58,12 @@ private val TABS = listOf("全部", "对话", "工具", "错误")
 private val TAB_TYPES = listOf(null, LogEntry.TYPE_CHAT, LogEntry.TYPE_TOOL, LogEntry.TYPE_ERROR)
 
 @Composable
-fun LogsScreen(bottomInset: Dp, vm: LogsViewModel = viewModel()) {
+fun LogsScreen(
+    bottomInset: Dp,
+    vm: LogsViewModel = viewModel(),
+    // 确认弹窗和撤销条画在 AppRoot 最外层,由 Activity 级的 ConfigViewModel 托管
+    uiVm: ConfigViewModel = viewModel()
+) {
     val entries by vm.entries.collectAsStateWithLifecycle()
     val keyword by vm.keyword.collectAsStateWithLifecycle()
     val typeFilter by vm.typeFilter.collectAsStateWithLifecycle()
@@ -75,7 +81,14 @@ fun LogsScreen(bottomInset: Dp, vm: LogsViewModel = viewModel()) {
                     tint = MiuixTheme.colorScheme.onBackground
                 )
             }
-            IconButton(onClick = { vm.clear() }) {
+            IconButton(onClick = {
+                // 一下删掉最多 500 条、不能撤销,得先问一句
+                uiVm.requestConfirm(
+                    title = "清空全部记录？",
+                    message = "所有对话、工具调用和错误记录都会被删除，且无法恢复。",
+                    confirmLabel = "清空"
+                ) { vm.clear() }
+            }) {
                 Icon(
                     imageVector = MiuixIcons.Delete,
                     contentDescription = "清空",
@@ -116,7 +129,14 @@ fun LogsScreen(bottomInset: Dp, vm: LogsViewModel = viewModel()) {
         }
 
         items(entries, key = { it.id }) { entry ->
-            LogRow(entry, Modifier.animateItem(), onDelete = { vm.delete(entry.id) })
+            LogRow(entry, Modifier.animateItem(), onDelete = {
+                vm.delete(entry.id)
+                uiVm.offerUndo(
+                    message = "已删除 1 条记录",
+                    onUndo = { vm.undoDelete(entry.id) },
+                    onCommit = { vm.commitDelete(entry.id) }
+                )
+            })
         }
     }
 }

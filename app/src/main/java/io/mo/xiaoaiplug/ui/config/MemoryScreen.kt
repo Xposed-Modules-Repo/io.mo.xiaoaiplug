@@ -159,7 +159,14 @@ fun MemoryScreen(
                 entry = entry,
                 modifier = Modifier.animateItem(),
                 onSave = { vm.edit(entry.id, it) },
-                onDelete = { vm.delete(entry.id) }
+                onDelete = {
+                    vm.delete(entry.id)
+                    configVm.offerUndo(
+                        message = "已删除 1 条记忆",
+                        onUndo = { vm.undoDelete(entry.id) },
+                        onCommit = { vm.commitDelete(entry.id) }
+                    )
+                }
             )
         }
     }

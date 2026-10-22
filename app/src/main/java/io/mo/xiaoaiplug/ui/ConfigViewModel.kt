@@ -8,6 +8,7 @@ import io.mo.xiaoaiplug.auto.AccessibilityGuard
 import io.mo.xiaoaiplug.config.AiClient
 import io.mo.xiaoaiplug.config.AiConfig
 import io.mo.xiaoaiplug.config.ConfigRepository
+import io.mo.xiaoaiplug.config.HostControl
 import io.mo.xiaoaiplug.config.LogEntry
 import io.mo.xiaoaiplug.config.LogStore
 import io.mo.xiaoaiplug.config.Tools
@@ -32,6 +33,12 @@ sealed interface TestState {
 
 /** 底部提示条停留多久（不含淡出动画的时长）。 */
 private const val TOAST_DURATION_MS = 2000L
+
+/** 「已删除 · 撤销」留多久。比提示条长：要给人反应过来、伸手去点的时间。 */
+private const val UNDO_WINDOW_MS = 4000L
+
+/** 输入框停手多久后写盘。 */
+private const val TEXT_WRITE_DELAY_MS = 400L
 
 /** 主页要显示的运行状况。 */
 data class StatusSnapshot(
@@ -109,8 +116,8 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                     val prefix = if (auto) "符号缓存已失效，已自动重扫：" else ""
                     prefix + when {
                         !reported -> "扫描结果保存失败，请重试"
-                        result.scan.cacheable -> "扫描完成，请重启小爱以加载新符号"
-                        else -> result.scan.summary + "；请重启小爱应用停用状态"
+                        result.scan.cacheable -> "扫描完成，点「重启小爱」加载新符号"
+                        else -> result.scan.summary + "；点「重启小爱」应用停用状态"
                     }
                 }
                 if (message == null) return@launch
@@ -187,7 +194,38 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun update(transform: (AiConfig) -> AiConfig) = repo.update(transform)
+    fun update(transform: (AiConfig) -> AiConfig) {
+        val before = config.value
+        repo.update(transform = transform)
+        afterConfigChange(before)
+    }
+
+    /**
+     * 输入框专用:内存立刻更新,写盘等停手 [TEXT_WRITE_DELAY_MS] 后合并成一次。
+     * 开关之类一次性的改动还是走 [update],立刻落盘。
+     */
+    fun updateText(transform: (AiConfig) -> AiConfig) {
+        val before = config.value
+        repo.update(TEXT_WRITE_DELAY_MS, transform)
+        afterConfigChange(before)
+    }
+
+    /** 界面退到后台时把还没写的输入落盘。 */
+    fun flushConfig() = repo.flush()
+
+    /**
+     * 连接相关的四项变了,上一次「测试OK / 失败」就不再说明当前配置 —— 留着它,
+     * 用户改完 Key 看到绿字会以为新 Key 也测过了。repo.update 是同步更新内存的,
+     * 所以这里读到的 config.value 已经是新值。
+     */
+    private fun afterConfigChange(before: AiConfig) {
+        val after = config.value
+        if (before.provider != after.provider || before.endpoint != after.endpoint ||
+            before.apiKey != after.apiKey || before.model != after.model
+        ) {
+            clearTestState()
+        }
+    }
 
     fun refreshStatus() {
         viewModelScope.launch {
@@ -219,6 +257,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun testConnection() {
         if (_testState.value == TestState.Running) return
+        val generation = ++testGeneration
         viewModelScope.launch {
             _testState.value = TestState.Running
             val cfg = config.value
@@ -235,15 +274,114 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             }
+            // 测试途中改了配置:这个结果测的是旧配置,丢掉,别把它挂在新配置下面
+            if (generation != testGeneration) return@launch
             _testState.value = result.fold(
                 onSuccess = { TestState.Ok(it.trim().take(200)) },
-                onFailure = { TestState.Failed("${it.javaClass.simpleName}: ${it.message}") }
+                onFailure = { TestState.Failed(AiClient.failureDetail(it)) }
             )
         }
     }
 
+    /** 每次开测和每次作废都加一,测试协程回来时对不上号就说明结果已过期。 */
+    private var testGeneration = 0
+
     fun clearTestState() {
+        testGeneration++
         _testState.value = TestState.Idle
+    }
+
+    /**
+     * 「重启小爱」:用 root 结束小爱进程,等同于用户去应用详情里点「结束运行」。
+     * 下次唤醒时小爱重新启动,加载刚扫出来的符号。
+     */
+    fun restartHost() {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { HostControl.forceStop() }
+            showToast(
+                if (ok) "已结束小爱，下次唤醒即加载新符号"
+                else "没有 root 权限，请到应用详情里结束运行超级小爱"
+            )
+            // 宿主读到新符号后才会回报;这里先刷一下,真正变绿要等下次唤醒
+            refreshStatus()
+        }
+    }
+
+    // ---- 二次确认 ----
+
+    /** 删不可恢复的东西前先问一句。弹窗画在 AppRoot 最外层,见 ConfirmDialog。 */
+    data class ConfirmRequest(
+        val title: String,
+        val message: String,
+        val confirmLabel: String,
+        val onConfirm: () -> Unit
+    )
+
+    private val _confirm = MutableStateFlow<ConfirmRequest?>(null)
+    val confirm: StateFlow<ConfirmRequest?> = _confirm.asStateFlow()
+
+    fun requestConfirm(title: String, message: String, confirmLabel: String, onConfirm: () -> Unit) {
+        _confirm.value = ConfirmRequest(title, message, confirmLabel, onConfirm)
+    }
+
+    fun resolveConfirm(accepted: Boolean) {
+        val request = _confirm.value ?: return
+        _confirm.value = null
+        if (accepted) request.onConfirm()
+    }
+
+    // ---- 撤销 ----
+
+    /** [seq] 让连着两条一样的文案也能被界面认成新的一条(重新计时、重播动画)。 */
+    data class UndoOffer(val seq: Long, val message: String)
+
+    private val _undo = MutableStateFlow<UndoOffer?>(null)
+    val undo: StateFlow<UndoOffer?> = _undo.asStateFlow()
+
+    private var undoSeq = 0L
+    private var undoAction: (() -> Unit)? = null
+    private var commitAction: (() -> Unit)? = null
+    private var undoJob: Job? = null
+
+    /**
+     * 底部弹一条「已删除 · 撤销」。[UNDO_WINDOW_MS] 内点撤销就调 [onUndo],否则调 [onCommit]
+     * 把删除真正落库。来了新的一条时,上一条立刻 commit —— 同一时间只留一个能撤销的操作。
+     */
+    fun offerUndo(message: String, onUndo: () -> Unit, onCommit: () -> Unit) {
+        settleUndo()
+        undoAction = onUndo
+        commitAction = onCommit
+        _undo.value = UndoOffer(++undoSeq, message)
+        undoJob = viewModelScope.launch {
+            delay(UNDO_WINDOW_MS)
+            settleUndo()
+        }
+    }
+
+    fun undo() {
+        val action = undoAction
+        undoJob?.cancel()
+        undoJob = null
+        undoAction = null
+        commitAction = null
+        _undo.value = null
+        action?.invoke()
+    }
+
+    private fun settleUndo() {
+        val commit = commitAction
+        undoJob?.cancel()
+        undoJob = null
+        undoAction = null
+        commitAction = null
+        _undo.value = null
+        commit?.invoke()
+    }
+
+    override fun onCleared() {
+        // 界面没了还挂着的删除照样落库,不然用户以为删掉的东西下次打开又回来了
+        settleUndo()
+        repo.flush()
     }
 
     /**

@@ -57,6 +57,8 @@ fun AppRoot() {
     val showDexDialog by vm.showDexDialog.collectAsStateWithLifecycle()
     val isScanningDex by vm.isScanningDex.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
+    val undoOffer by vm.undo.collectAsStateWithLifecycle()
+    val confirmRequest by vm.confirm.collectAsStateWithLifecycle()
 
     val updateVm: UpdateViewModel = viewModel()
     val pendingUpdate by updateVm.pending.collectAsStateWithLifecycle()
@@ -112,6 +114,14 @@ fun AppRoot() {
             }
             // 放在 layerBackdrop 那层**外面**：进去的话底栏会把提示条一起采样进模糊里。
             BottomToast(message = toast, bottomInset = bottomInset)
+            UndoBar(offer = undoOffer, bottomInset = bottomInset, onUndo = { vm.undo() })
+
+            // 二次确认同样在 layerBackdrop 外面,采应用内容层做毛玻璃
+            ConfirmDialog(
+                request = confirmRequest,
+                backdrop = backdrop,
+                onResult = { vm.resolveConfirm(it) }
+            )
 
             // 更新弹窗同样在 layerBackdrop 外面，但它采样 backdrop（应用内容层）做毛玻璃 ——
             // 于是卡片透出的是它背后那一整屏应用界面的模糊。
@@ -131,6 +141,7 @@ fun AppRoot() {
                 backdrop = backdrop,
                 isScanning = isScanningDex,
                 onRescan = { vm.rescanDexSymbols() },
+                onRestartHost = { vm.restartHost() },
                 onDismiss = { vm.closeDexDialog() }
             )
         }

@@ -24,6 +24,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        // 输入框的写盘是停手后才做的;切走时立刻落盘,免得进程被杀丢掉最后几个字
+        vm.flushConfig()
+    }
+
     override fun onResume() {
         super.onResume()
         // 用户可能刚从系统设置里开完无障碍再切回来，回前台时重新查一遍状态

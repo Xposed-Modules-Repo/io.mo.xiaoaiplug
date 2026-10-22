@@ -8,6 +8,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -20,7 +21,6 @@ import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -39,7 +39,7 @@ fun InterceptScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                 title = "拦截跳转系统设置",
                 summary = "拦截某些回复跳转系统设置",
                 words = config.jumpAllowWords,
-                onWordsChange = { v -> vm.update { it.copy(jumpAllowWords = v) } },
+                onWordsChange = { v -> vm.updateText { it.copy(jumpAllowWords = v) } },
                 hint = "白名单，逗号或空格分隔。留空使用默认",
                 defaultWords = DEFAULT_JUMP_ALLOW_WORDS
             )
@@ -53,7 +53,7 @@ fun InterceptScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                 title = "拦截兜底搜索",
                 summary = "拦下简单问题跳搜索",
                 words = config.webSearchAllowWords,
-                onWordsChange = { v -> vm.update { it.copy(webSearchAllowWords = v) } },
+                onWordsChange = { v -> vm.updateText { it.copy(webSearchAllowWords = v) } },
                 hint = "白名单，逗号或空格分隔。留空使用默认",
                 defaultWords = DEFAULT_WEB_SEARCH_ALLOW_WORDS
             )
@@ -67,7 +67,7 @@ fun InterceptScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                 title = "命中正则不接管",
                 summary = "问话命中就完全不接管，原生行为照旧（某些行为系统自带效果更佳，不建议删除）",
                 words = config.skipTakeoverPattern,
-                onWordsChange = { v -> vm.update { it.copy(skipTakeoverPattern = v) } },
+                onWordsChange = { v -> vm.updateText { it.copy(skipTakeoverPattern = v) } },
                 hint = "正则表达式，留空使用默认",
                 defaultWords = DEFAULT_SKIP_TAKEOVER_PATTERN,
                 fieldLabel = "正则表达式"
@@ -92,6 +92,7 @@ private fun AllowWordsCard(
     defaultWords: String,
     fieldLabel: String = "放行词"
 ) {
+    val focusManager = LocalFocusManager.current
     Card(Modifier.fillMaxWidth()) {
         SwitchPreference(
             checked = checked,
@@ -99,7 +100,7 @@ private fun AllowWordsCard(
             title = title,
             summary = summary
         )
-        TextField(
+        ConfigTextField(
             value = words,
             onValueChange = onWordsChange,
             label = fieldLabel,
@@ -123,7 +124,11 @@ private fun AllowWordsCard(
             )
             TextButton(
                 text = "恢复默认",
-                onClick = { onWordsChange(defaultWords) },
+                onClick = {
+                    // 先放掉焦点,输入框才会接收这次外部改动(见 ConfigTextField)
+                    focusManager.clearFocus()
+                    onWordsChange(defaultWords)
+                },
                 // 开关关掉时输入框已经灰了，按钮也得跟着停用 —— 否则能去改一个当前根本不生效的值
                 enabled = checked && words != defaultWords,
                 minWidth = 0.dp,

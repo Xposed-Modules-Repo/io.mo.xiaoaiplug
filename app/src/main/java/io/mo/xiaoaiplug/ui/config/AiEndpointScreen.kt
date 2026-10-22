@@ -13,6 +13,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
@@ -30,7 +31,6 @@ import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Hide
 import top.yukonga.miuix.kmp.icon.extended.Show
@@ -43,6 +43,7 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
     val config by vm.config.collectAsStateWithLifecycle()
     val testState by vm.testState.collectAsStateWithLifecycle()
     var keyVisible by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
 
     val provider = config.aiProvider
     val providers = AiProvider.entries
@@ -66,17 +67,17 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
         item { SmallTitle("端点") }
         item {
             Card(Modifier.fillMaxWidth(), insideMargin = CardContentPadding) {
-                TextField(
+                ConfigTextField(
                     value = config.endpoint,
-                    onValueChange = { v -> vm.update { it.copy(endpoint = v) } },
+                    onValueChange = { v -> vm.updateText { it.copy(endpoint = v) } },
                     // 留空时这行灰字就是实际会用的地址，不是单纯的提示
                     label = provider.defaultEndpoint,
                     useLabelAsPlaceholder = true,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
                 )
-                TextField(
+                ConfigTextField(
                     value = config.apiKey,
-                    onValueChange = { v -> vm.update { it.copy(apiKey = v) } },
+                    onValueChange = { v -> vm.updateText { it.copy(apiKey = v) } },
                     label = "API Key",
                     useLabelAsPlaceholder = false,
                     // 密钥默认打码：这一页随时可能被人瞄到，也可能被截图发出去问问题
@@ -94,9 +95,9 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
                 )
 
-                TextField(
+                ConfigTextField(
                     value = config.model,
-                    onValueChange = { v -> vm.update { it.copy(model = v) } },
+                    onValueChange = { v -> vm.updateText { it.copy(model = v) } },
                     label = provider.defaultModel,
                     useLabelAsPlaceholder = true,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
@@ -107,9 +108,9 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
         item { SmallTitle("系统提示词") }
         item {
             Card(Modifier.fillMaxWidth(), insideMargin = CardContentPadding) {
-                TextField(
+                ConfigTextField(
                     value = config.systemPrompt,
-                    onValueChange = { v -> vm.update { it.copy(systemPrompt = v) } },
+                    onValueChange = { v -> vm.updateText { it.copy(systemPrompt = v) } },
                     label = "系统提示词（留空使用内置默认）",
                     useLabelAsPlaceholder = false,
                     minLines = 3,
@@ -131,7 +132,11 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                     )
                     TextButton(
                         text = "填入默认",
-                        onClick = { vm.update { it.copy(systemPrompt = DEFAULT_SYSTEM_PROMPT) } },
+                        onClick = {
+                            // 先放掉焦点,输入框才会接收这次外部改动(见 ConfigTextField)
+                            focusManager.clearFocus()
+                            vm.update { it.copy(systemPrompt = DEFAULT_SYSTEM_PROMPT) }
+                        },
                         // 已经一字不差了再点没有任何效果，按钮就该是灰的
                         enabled = config.systemPrompt != DEFAULT_SYSTEM_PROMPT,
                         minWidth = 0.dp,

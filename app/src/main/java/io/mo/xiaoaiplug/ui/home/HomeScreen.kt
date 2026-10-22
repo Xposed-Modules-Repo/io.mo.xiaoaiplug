@@ -30,6 +30,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.mo.xiaoaiplug.ui.ConfigViewModel
 import io.mo.xiaoaiplug.ui.nav.CardContentPadding
 import io.mo.xiaoaiplug.ui.nav.PageScaffold
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
@@ -63,7 +64,10 @@ fun HomeScreen(
                     title = "DEX缓存适配",
                     summary = status.dexStatus.homeSummary,
                     action = { vm.openDexDialog() },
-                    actionLabel = "查看"
+                    actionLabel = "查看",
+                    // 扫完待加载时,符号要等小爱重启才生效 —— 直接给出重启入口,不用用户自己去应用详情里找
+                    secondaryAction = if (status.dexStatus.pending) ({ vm.restartHost() }) else null,
+                    secondaryActionLabel = "重启小爱"
                 )
                 StatusRow(
                     ok = status.accessibilityOn,
@@ -144,7 +148,9 @@ fun HomeScreen(
 
         item {
             Text(
-                text = "修改后结束运行超级小爱生效。",
+                // 小爱每次问话都现读配置,改动下一句话就生效;只有 DEX 符号要重启小爱(见上面那行)。
+                // 早先这里写着「修改后结束运行超级小爱生效」,让用户每改一项都白白多杀一次小爱。
+                text = "配置改动即时生效，下一次对话起使用新设置。",
                 fontSize = MiuixTheme.textStyles.footnote1.fontSize,
                 color = MiuixTheme.colorScheme.onBackgroundVariant,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 16.dp)
@@ -159,7 +165,9 @@ private fun StatusRow(
     title: String,
     summary: String,
     action: (() -> Unit)? = null,
-    actionLabel: String = "去开启"
+    actionLabel: String = "去开启",
+    secondaryAction: (() -> Unit)? = null,
+    secondaryActionLabel: String = ""
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
@@ -177,6 +185,14 @@ private fun StatusRow(
                 text = summary,
                 fontSize = MiuixTheme.textStyles.footnote1.fontSize,
                 color = MiuixTheme.colorScheme.onBackgroundVariant
+            )
+        }
+        if (secondaryAction != null) {
+            TextButton(
+                text = secondaryActionLabel,
+                onClick = secondaryAction,
+                colors = ButtonDefaults.textButtonColorsPrimary(),
+                modifier = Modifier.padding(end = if (action != null) 8.dp else 0.dp)
             )
         }
         if (action != null) {

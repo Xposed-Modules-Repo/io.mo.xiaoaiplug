@@ -5,12 +5,15 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.mo.xiaoaiplug.config.LogEntry
 import io.mo.xiaoaiplug.config.LogStore
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 
 class LogsViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -56,22 +59,42 @@ class LogsViewModel(app: Application) : AndroidViewModel(app) {
                     limit = LogStore.MAX_ROWS
                 )
             }
-            _entries.value = rows
+            // 撤销窗口里的行库里还在,别被这次重查又带回来
+            _entries.value = rows.filterNot { it.id in pendingDeletes }
             _loading.value = false
         }
     }
 
+    /** 左滑删掉、还在撤销窗口里的行:界面上已经摘掉,库里还在。落库在 IO 线程,所以用并发集合。 */
+    private val pendingDeletes: MutableSet<Long> = ConcurrentHashMap.newKeySet()
+
     /**
-     * 删掉单条。
+     * 落库不挂在 viewModelScope 上:撤销计时由 ConfigViewModel 管,它触发落库时
+     * 这个 ViewModel 可能已经被清掉了,跟着取消的话删掉的记录下次打开又回来。
+     */
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * 删掉单条 —— 先只从界面上摘掉,真正落库等撤销窗口过了再由 [commitDelete] 做。
      *
-     * 先把内存里的列表摘掉再落库:列表的移除动画要立刻跟手,等 IO 回来才更新会顿一下。
+     * 先把内存里的列表摘掉:列表的移除动画要立刻跟手,等 IO 回来才更新会顿一下。
      * 删完**故意不 refresh** —— 重查会整个换掉 _entries,正在播的移除动画会被拦腰打断。
-     * 少一条不影响筛选和搜索的结果集,下次 refresh 自然对齐。
      */
     fun delete(id: Long) {
+        pendingDeletes.add(id)
         _entries.value = _entries.value.filterNot { it.id == id }
-        viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.delete(id) }
+    }
+
+    /** 撤销:库里本来就还在,重查一遍它就按原来的时间顺序回到原位。 */
+    fun undoDelete(id: Long) {
+        if (pendingDeletes.remove(id)) refresh()
+    }
+
+    fun commitDelete(id: Long) {
+        ioScope.launch {
+            store.delete(id)
+            // 删完才放手,中间要是正好有一次 refresh,也不会把它带回来
+            pendingDeletes.remove(id)
         }
     }
 

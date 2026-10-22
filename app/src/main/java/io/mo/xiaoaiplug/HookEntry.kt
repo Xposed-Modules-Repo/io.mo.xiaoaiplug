@@ -2418,8 +2418,11 @@ class HookEntry : IXposedHookLoadPackage {
             } catch (t: Throwable) {
                 Log.i(TAG, "AI call failed key=$key: $t")
                 if (replyTurns.isCurrent(key)) {
-                    for (id in utteranceDialogs[key].orEmpty()) applyAnswer(key, id, AiClient.FAILED_ANSWER)
-                    speakAnswer(key, AiClient.FAILED_ANSWER)
+                    // 按异常类型说清楚是 Key、网络还是服务商的问题,不再一律念"无法解析的工具调用"。
+                    // 硬失败本来就不进缓存和上下文,所以这里不必走 isSoftFailure。
+                    val failure = AiClient.failureAnswer(t)
+                    for (id in utteranceDialogs[key].orEmpty()) applyAnswer(key, id, failure)
+                    speakAnswer(key, failure)
                 }
             }
         }.start()

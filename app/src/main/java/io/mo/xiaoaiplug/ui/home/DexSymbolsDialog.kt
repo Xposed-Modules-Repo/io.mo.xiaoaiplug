@@ -55,10 +55,12 @@ import io.mo.xiaoaiplug.ui.liquid.lens
 import io.mo.xiaoaiplug.ui.liquid.vibrancy
 import io.mo.xiaoaiplug.ui.theme.LocalIsDark
 import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.blur.Backdrop
 import top.yukonga.miuix.kmp.blur.blur
@@ -81,6 +83,7 @@ fun DexSymbolsDialog(
     backdrop: Backdrop,
     isScanning: Boolean = false,
     onRescan: () -> Unit = {},
+    onRestartHost: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -276,6 +279,16 @@ fun DexSymbolsDialog(
                                     fontSize = 11.sp,
                                     color = MiuixTheme.colorScheme.onBackgroundVariant
                                 )
+                                // 扫描结果要等小爱重启才加载:就在提示旁边给出入口,而不是让用户自己去应用详情里找
+                                if (dexStatus.pending && !isScanning) {
+                                    Spacer(Modifier.height(8.dp))
+                                    TextButton(
+                                        text = "重启小爱",
+                                        onClick = onRestartHost,
+                                        colors = ButtonDefaults.textButtonColorsPrimary(),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
                             }
                         }
 
