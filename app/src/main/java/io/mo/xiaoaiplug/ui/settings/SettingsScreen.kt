@@ -123,11 +123,12 @@ fun SettingsScreen(
         item { SmallTitle("更新") }
         item {
             Card(Modifier.fillMaxWidth()) {
+                // 开关和下面的手动检查原来都叫「检查更新」,分不清哪个是点了立刻查的
                 SwitchPreference(
                     checked = autoCheckUpdate,
                     onCheckedChange = { on -> updateVm.setAutoCheckUpdate(on) },
-                    title = "检查更新",
-                    summary = "打开应用自动检查新版本"
+                    title = "自动检查更新",
+                    summary = "打开应用时检查新版本"
                 )
                 ArrowPreference(
                     title = "检查更新",

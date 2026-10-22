@@ -1,5 +1,8 @@
 package io.mo.xiaoaiplug.ui.logs
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -9,6 +12,7 @@ import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
@@ -20,17 +24,20 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.mo.xiaoaiplug.config.LogEntry
@@ -43,6 +50,7 @@ import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.TabRow
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Delete
@@ -65,9 +73,20 @@ fun LogsScreen(
     uiVm: ConfigViewModel = viewModel()
 ) {
     val entries by vm.entries.collectAsStateWithLifecycle()
-    val keyword by vm.keyword.collectAsStateWithLifecycle()
     val typeFilter by vm.typeFilter.collectAsStateWithLifecycle()
     val selectedTab = TAB_TYPES.indexOf(typeFilter).coerceAtLeast(0)
+    val context = LocalContext.current
+
+    // 搜索框显示自己手里的文字,不绑 vm.keyword 那个 StateFlow:流比按键晚一拍,
+    // 快速输入和中文组字会被旧值盖回去(同 ConfigTextField 的理由)。
+    var keyword by rememberSaveable { mutableStateOf(vm.keyword.value) }
+
+    // 切到这一页、或者从小爱那边说完话切回来时都重查一次 ——
+    // 早先只在 ViewModel 创建时查过一次,之后的新对话得手动点刷新才看得到。
+    LifecycleResumeEffect(Unit) {
+        vm.refresh()
+        onPauseOrDispose { }
+    }
 
     PageScaffold(
         title = "记录",
@@ -109,7 +128,10 @@ fun LogsScreen(
         item {
             TextField(
                 value = keyword,
-                onValueChange = { vm.setKeyword(it) },
+                onValueChange = {
+                    keyword = it
+                    vm.setKeyword(it)
+                },
                 label = "搜索内容",
                 useLabelAsPlaceholder = true,
                 singleLine = true,
@@ -129,7 +151,10 @@ fun LogsScreen(
         }
 
         items(entries, key = { it.id }) { entry ->
-            LogRow(entry, Modifier.animateItem(), onDelete = {
+            LogRow(entry, Modifier.animateItem(), onCopy = {
+                copyEntry(context, entry)
+                uiVm.showToast("已复制这条记录")
+            }, onDelete = {
                 vm.delete(entry.id)
                 uiVm.offerUndo(
                     message = "已删除 1 条记录",
@@ -152,7 +177,12 @@ private const val DELETE_FRACTION = 1f / 3f
 private const val MIN_DRAG_FACTOR = 0.35f
 
 @Composable
-private fun LogRow(entry: LogEntry, modifier: Modifier = Modifier, onDelete: () -> Unit) {
+private fun LogRow(
+    entry: LogEntry,
+    modifier: Modifier = Modifier,
+    onCopy: () -> Unit,
+    onDelete: () -> Unit
+) {
     var expanded by remember { mutableStateOf(false) }
     val time = remember(entry.time) {
         SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date(entry.time))
@@ -269,6 +299,14 @@ private fun LogRow(entry: LogEntry, modifier: Modifier = Modifier, onDelete: () 
                         color = MiuixTheme.colorScheme.onBackgroundVariant,
                         modifier = Modifier.padding(top = 8.dp)
                     )
+                    // 反馈问题时要把详情发出去;只在展开后出现,收起时不占地方
+                    TextButton(
+                        text = "复制",
+                        onClick = onCopy,
+                        minWidth = 0.dp,
+                        insideMargin = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                        modifier = Modifier.align(Alignment.End).padding(top = 8.dp)
+                    )
                 }
             }
         }
@@ -294,6 +332,19 @@ private fun DeleteHint(progress: () -> Float) {
             // 跟着划出的比例淡入，到阈值时正好完全不透明
             .alpha((p / DELETE_FRACTION).coerceIn(0f, 1f))
     )
+}
+
+/** 复制整条记录:类型、时间、耗时、标题和详情,贴出去不用再补上下文。 */
+private fun copyEntry(context: Context, entry: LogEntry) {
+    val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(entry.time))
+    val head = buildString {
+        append("[").append(typeLabel(entry.type)).append("] ").append(time)
+        if (entry.durationMs >= 0) append(" · ").append(entry.durationMs).append("ms")
+        if (!entry.ok) append(" · 失败")
+    }
+    val text = listOf(head, entry.title, entry.detail).filter { it.isNotBlank() }.joinToString("\n\n")
+    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    cm.setPrimaryClip(ClipData.newPlainText("xiaoai_plug_log", text))
 }
 
 private fun typeLabel(type: String): String = when (type) {

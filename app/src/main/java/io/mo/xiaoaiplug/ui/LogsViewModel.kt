@@ -7,13 +7,18 @@ import io.mo.xiaoaiplug.config.LogEntry
 import io.mo.xiaoaiplug.config.LogStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+
+/** 搜索框停手多久后才查。 */
+private const val KEYWORD_DEBOUNCE_MS = 250L
 
 class LogsViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -32,6 +37,15 @@ class LogsViewModel(app: Application) : AndroidViewModel(app) {
 
     private val store get() = LogStore.get(getApplication())
 
+    /** 左滑删掉、还在撤销窗口里的行:界面上已经摘掉,库里还在。落库在 IO 线程,所以用并发集合。 */
+    private val pendingDeletes: MutableSet<Long> = ConcurrentHashMap.newKeySet()
+
+    /**
+     * 正在跑的那次查询。新查询开始前先取消它 —— 搜索框每敲一个字都会查一次,
+     * 不取消的话慢的旧查询可能比新的晚回来,把列表盖成旧关键词的结果。
+     */
+    private var refreshJob: Job? = null
+
     init {
         refresh()
     }
@@ -45,11 +59,14 @@ class LogsViewModel(app: Application) : AndroidViewModel(app) {
     fun setKeyword(keyword: String) {
         if (_keyword.value == keyword) return
         _keyword.value = keyword
-        refresh()
+        // 停手一小会儿再查:连着打字时中间那几次查询的结果反正会被下一次盖掉
+        refresh(delayMs = KEYWORD_DEBOUNCE_MS)
     }
 
-    fun refresh() {
-        viewModelScope.launch {
+    fun refresh(delayMs: Long = 0) {
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
+            if (delayMs > 0) delay(delayMs)
             _loading.value = true
             val rows = withContext(Dispatchers.IO) {
                 // 滚动上限就是 500 条,一次全取出来比做分页简单,量也扛得住。
@@ -64,9 +81,6 @@ class LogsViewModel(app: Application) : AndroidViewModel(app) {
             _loading.value = false
         }
     }
-
-    /** 左滑删掉、还在撤销窗口里的行:界面上已经摘掉,库里还在。落库在 IO 线程,所以用并发集合。 */
-    private val pendingDeletes: MutableSet<Long> = ConcurrentHashMap.newKeySet()
 
     /**
      * 落库不挂在 viewModelScope 上:撤销计时由 ConfigViewModel 管,它触发落库时

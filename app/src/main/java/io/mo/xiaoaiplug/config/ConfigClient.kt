@@ -46,7 +46,9 @@ data class AiConfig(
     // MCP 服务列表 JSON 字符串
     val mcpServersRaw: String = "",
     // 只显示接口返回的思考内容，不启用模型的思考模式；默认关闭。
-    val showThinking: Boolean = false
+    val showThinking: Boolean = false,
+    // 长回答自动播报只念开头一两句，提示去看屏幕；卡片和喇叭重播仍是全文。默认关闭。
+    val speakBrief: Boolean = false
 ) {
     /** 解析后的 MCP 服务配置列表 */
     val mcpServers: List<McpServerConfig> get() = McpServerConfig.parseList(mcpServersRaw)
@@ -151,7 +153,8 @@ object ConfigClient {
             // 注意这里不是「空即开」—— 默认关，只有显式存过 "true" 才算开。
             autoFixAccessibility = autoFixRaw == "true",
             mcpServersRaw = result?.getString(ConfigKeys.MCP_SERVERS).orEmpty(),
-            showThinking = result?.getString(ConfigKeys.SHOW_THINKING) == "true"
+            showThinking = result?.getString(ConfigKeys.SHOW_THINKING) == "true",
+            speakBrief = result?.getString(ConfigKeys.SPEAK_BRIEF) == "true"
         )
     }
 
@@ -170,6 +173,7 @@ object ConfigClient {
             putString(ConfigKeys.WEB_SEARCH_ALLOW_WORDS, config.webSearchAllowWords)
             putString(ConfigKeys.SPEAK_ANSWER, config.speakAnswer.toString())
             putString(ConfigKeys.SHOW_THINKING, config.showThinking.toString())
+            putString(ConfigKeys.SPEAK_BRIEF, config.speakBrief.toString())
             putString(ConfigKeys.ENABLED_TOOLS, config.enabledTools)
             putString(ConfigKeys.SHELL_POLICY, config.shellPolicy)
             putString(ConfigKeys.USE_NATIVE_TOOLS, config.useNativeTools.toString())

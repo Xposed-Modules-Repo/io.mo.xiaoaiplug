@@ -6,8 +6,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -23,6 +25,7 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import java.util.regex.PatternSyntaxException
 
 @Composable
 fun InterceptScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
@@ -70,7 +73,8 @@ fun InterceptScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                 onWordsChange = { v -> vm.updateText { it.copy(skipTakeoverPattern = v) } },
                 hint = "正则表达式，留空使用默认",
                 defaultWords = DEFAULT_SKIP_TAKEOVER_PATTERN,
-                fieldLabel = "正则表达式"
+                fieldLabel = "正则表达式",
+                validate = ::regexError
             )
         }
     }
@@ -90,8 +94,11 @@ private fun AllowWordsCard(
     onWordsChange: (String) -> Unit,
     hint: String,
     defaultWords: String,
-    fieldLabel: String = "放行词"
+    fieldLabel: String = "放行词",
+    // 返回 null 表示没问题;否则是要用红字替换掉 hint 的错误说明
+    validate: ((String) -> String?)? = null
 ) {
+    val error = remember(words, validate) { validate?.invoke(words) }
     val focusManager = LocalFocusManager.current
     Card(Modifier.fillMaxWidth()) {
         SwitchPreference(
@@ -117,9 +124,9 @@ private fun AllowWordsCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = hint,
+                text = error ?: hint,
                 fontSize = MiuixTheme.textStyles.footnote2.fontSize,
-                color = MiuixTheme.colorScheme.onBackgroundVariant,
+                color = if (error != null) Color(0xFFFF3B30) else MiuixTheme.colorScheme.onBackgroundVariant,
                 modifier = Modifier.weight(1f).padding(end = 8.dp)
             )
             TextButton(
@@ -136,4 +143,18 @@ private fun AllowWordsCard(
             )
         }
     }
+}
+
+/**
+ * 白名单正则写错时的说明。hook 那边编译失败会**静默当作没写**(见 HookEntry.isAiTakeoverSkip),
+ * 用户只会觉得"白名单怎么不灵了";在这里当场标红,改对之前就知道它不生效。
+ * 用的是同一个 Regex 引擎,这里能编译过,小爱那边就能。
+ */
+private fun regexError(pattern: String): String? {
+    if (pattern.isBlank()) return null
+    val e = runCatching { Regex(pattern) }.exceptionOrNull() ?: return null
+    val where = (e as? PatternSyntaxException)?.index?.takeIf { it >= 0 }
+        ?.let { "（第 ${it + 1} 个字符附近）" }.orEmpty()
+    val what = (e as? PatternSyntaxException)?.description ?: e.message.orEmpty()
+    return "正则写法有误$where，当前不会生效：$what"
 }

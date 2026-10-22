@@ -93,7 +93,11 @@ private fun ConfigList(
                 )
                 ArrowPreference(
                     title = "语音播报",
-                    summary = if (config.speakAnswer) "已开启" else "已关闭（只出卡片、不出声）",
+                    summary = when {
+                        !config.speakAnswer -> "已关闭（只出卡片、不出声）"
+                        config.speakBrief -> "已开启 · 长回答只念开头"
+                        else -> "已开启"
+                    },
                     onClick = { onOpen(ConfigRoute.SPEAK) }
                 )
             }

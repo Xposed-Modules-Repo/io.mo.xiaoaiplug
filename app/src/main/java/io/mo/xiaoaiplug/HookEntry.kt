@@ -10,6 +10,7 @@ import io.mo.xiaoaiplug.config.ChatHistory
 import io.mo.xiaoaiplug.config.ConfigClient
 import io.mo.xiaoaiplug.hook.SettingsHook
 import io.mo.xiaoaiplug.hook.ReplyTurns
+import io.mo.xiaoaiplug.hook.BriefSpeech
 import io.mo.xiaoaiplug.hook.ReplyCards
 import io.mo.xiaoaiplug.hook.ReplyPresentation
 import io.mo.xiaoaiplug.hook.ReplyTextRenderer
@@ -2003,8 +2004,11 @@ class HookEntry : IXposedHookLoadPackage {
             // 不管念得成不成,都要把 b2 换成我们的文本:否则用户点卡片右下角喇叭
             // 重播时放的仍是小爱的原始答案,声音和屏幕上的字对不上。
             syncSpeakContent(cl, dialogId, speakable)
-            if (speakViaToastPlayer(cl, speakable)) {
-                Log.i(TAG, "spoke answer via n1 dialogId=$dialogId len=${speakable.length}")
+            // 「长回答只念开头」只作用于这次自动播报;上面写进 SpeakContent 的仍是全文,
+            // 用户想听完整的,点卡片喇叭重播就是全文。
+            val spoken = if (cfg.speakBrief) BriefSpeech.cut(speakable) else speakable
+            if (speakViaToastPlayer(cl, spoken)) {
+                Log.i(TAG, "spoke answer via n1 dialogId=$dialogId len=${spoken.length}/${speakable.length}")
                 return@post
             }
             // 主引擎可能已销毁且 speak() 会静默返回；释放拦截还会让原生回答重新开口。

@@ -38,5 +38,25 @@ fun SpeakScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                 )
             }
         }
+
+        item { SmallTitle("长回答") }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                SwitchPreference(
+                    checked = config.speakBrief,
+                    onCheckedChange = { on -> vm.update { it.copy(speakBrief = on) } },
+                    title = "长回答只念开头",
+                    summary = "只念前一两句，再提示「详细内容请看屏幕」",
+                    // 不出声的时候这一项没有意义
+                    enabled = config.speakAnswer
+                )
+                Text(
+                    text = "卡片上始终是完整答案；想听全文，点卡片上的喇叭重播即可。",
+                    fontSize = MiuixTheme.textStyles.footnote2.fontSize,
+                    color = MiuixTheme.colorScheme.onBackgroundVariant,
+                    modifier = Modifier.padding(horizontal = CardHorizontalPadding, vertical = 8.dp)
+                )
+            }
+        }
     }
 }

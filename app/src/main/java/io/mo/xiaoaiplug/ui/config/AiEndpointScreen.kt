@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -22,6 +23,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.mo.xiaoaiplug.config.AiProvider
 import io.mo.xiaoaiplug.config.DEFAULT_SYSTEM_PROMPT
 import io.mo.xiaoaiplug.ui.ConfigViewModel
+import io.mo.xiaoaiplug.ui.ModelListState
 import io.mo.xiaoaiplug.ui.TestState
 import io.mo.xiaoaiplug.ui.nav.CardContentPadding
 import io.mo.xiaoaiplug.ui.nav.CardHorizontalPadding
@@ -37,16 +39,21 @@ import top.yukonga.miuix.kmp.icon.extended.Show
 import top.yukonga.miuix.kmp.preference.SwitchPreference
 import top.yukonga.miuix.kmp.preference.WindowDropdownPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import java.util.Locale
 
 @Composable
 fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
     val config by vm.config.collectAsStateWithLifecycle()
     val testState by vm.testState.collectAsStateWithLifecycle()
+    val modelList by vm.modelList.collectAsStateWithLifecycle()
     var keyVisible by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
 
     val provider = config.aiProvider
     val providers = AiProvider.entries
+
+    // 离开这一页时收掉模型列表,免得下次进来弹窗自己冒出来
+    DisposableEffect(Unit) { onDispose { vm.dismissModelList() } }
 
     SubScreen(title = "AI 接入", bottomInset = bottomInset, onBack = onBack) {
         item { SmallTitle("服务商") }
@@ -102,6 +109,27 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                     useLabelAsPlaceholder = true,
                     modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
                 )
+                // 模型名手打容易错(大小写、前缀、日期后缀),直接从服务商拉一份来挑
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val failed = modelList as? ModelListState.Failed
+                    Text(
+                        text = failed?.message ?: "不确定模型名？可以从服务商获取列表",
+                        fontSize = MiuixTheme.textStyles.footnote2.fontSize,
+                        color = if (failed != null) Color(0xFFFF3B30)
+                        else MiuixTheme.colorScheme.onBackgroundVariant,
+                        modifier = Modifier.weight(1f).padding(end = 8.dp)
+                    )
+                    TextButton(
+                        text = if (modelList is ModelListState.Loading) "获取中…" else "获取列表",
+                        onClick = { vm.fetchModels() },
+                        enabled = modelList !is ModelListState.Loading,
+                        minWidth = 0.dp,
+                        insideMargin = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                    )
+                }
             }
         }
 
@@ -194,7 +222,7 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                         modifier = Modifier.fillMaxWidth()
                     )
                     val (msg, color) = when (val s = testState) {
-                        is TestState.Ok -> "测试OK：${s.reply}" to Color(0xFF34C759)
+                        is TestState.Ok -> "测试OK（${formatSeconds(s.elapsedMs)}）：${s.reply}" to Color(0xFF34C759)
                         is TestState.Failed -> "失败：${s.message}" to Color(0xFFFF3B30)
                         else -> null to Color.Unspecified
                     }
@@ -210,4 +238,22 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
             }
         }
     }
+
+    (modelList as? ModelListState.Loaded)?.let { loaded ->
+        ModelPickerDialog(
+            models = loaded.models,
+            current = config.effectiveModel,
+            onPick = { id ->
+                // 先放掉焦点,模型输入框才会接收这次外部改动(见 ConfigTextField)
+                focusManager.clearFocus()
+                vm.update { it.copy(model = id) }
+                vm.dismissModelList()
+            },
+            onDismiss = { vm.dismissModelList() }
+        )
+    }
 }
+
+/** 1834 → "1.8 秒"。 */
+private fun formatSeconds(ms: Long): String =
+    String.format(Locale.US, "%.1f 秒", ms / 1000.0)

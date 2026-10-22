@@ -107,6 +107,69 @@ object AiClient {
         return if (f.detail.isBlank()) f.reason else "${f.reason}（${f.detail}）"
     }
 
+    /**
+     * 拉服务商的模型列表(AI 接入页「获取列表」用),省得用户手打模型名打错。
+     *
+     * 两种协议都是 `GET {base}/models`:OpenAI 兼容带 Bearer,Anthropic 带 x-api-key +
+     * anthropic-version。base 取 [AiConfig.effectiveEndpoint],用户填了完整的
+     * `/chat/completions` 或 `/messages` 也认。失败照常抛,调用方用 [failureDetail] 说明。
+     * 同步阻塞,放后台线程调。
+     */
+    fun listModels(config: AiConfig): List<String> {
+        val base = config.effectiveEndpoint.trimEnd('/')
+            .removeSuffix("/chat/completions")
+            .removeSuffix("/messages")
+        val headers = HashMap<String, String>()
+        val wire = config.aiProvider.wire
+        val url = when (wire) {
+            AiProvider.Wire.OPENAI -> {
+                if (config.apiKey.isNotBlank()) headers["Authorization"] = "Bearer ${config.apiKey}"
+                URL("$base/models")
+            }
+            AiProvider.Wire.ANTHROPIC -> {
+                headers["anthropic-version"] = ANTHROPIC_VERSION
+                if (config.apiKey.isNotBlank()) headers["x-api-key"] = config.apiKey
+                // 默认一页只有 20 个
+                URL("$base/models?limit=1000")
+            }
+        }
+        val text = getText(url, headers).trim()
+        // 标准形状是 {"data":[{"id":…}]};有的兼容端点用 "models",也有直接返回数组的
+        val items = if (text.startsWith("[")) JSONArray(text) else JSONObject(text).let {
+            it.optJSONArray("data") ?: it.optJSONArray("models") ?: JSONArray()
+        }
+        val ids = ArrayList<String>()
+        for (i in 0 until items.length()) {
+            val id = when (val item = items.opt(i)) {
+                is JSONObject -> item.optString("id").ifBlank { item.optString("name") }
+                is String -> item
+                else -> ""
+            }
+            if (id.isNotBlank()) ids.add(id)
+        }
+        // Anthropic 本来就按发布时间新的在前;OpenAI 兼容端点的顺序没有意义,按名字排好找
+        return if (wire == AiProvider.Wire.OPENAI) ids.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER)
+        else ids.distinct()
+    }
+
+    private fun getText(url: URL, headers: Map<String, String>): String {
+        val conn = url.openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "GET"
+            for ((k, v) in headers) conn.setRequestProperty(k, v)
+            // 只是拉个列表,用户在界面上等着,不用像对话那样给足 30/60 秒
+            conn.connectTimeout = 15000
+            conn.readTimeout = 20000
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            if (code !in 200..299) throw HttpError(code, text)
+            return text
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     private class Failure(val reason: String, val hint: String, val detail: String)
 
     private const val HINT_CONFIG = "请到模块里检查配置"

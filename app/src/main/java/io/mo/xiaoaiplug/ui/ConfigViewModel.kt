@@ -27,8 +27,17 @@ import java.util.Calendar
 sealed interface TestState {
     data object Idle : TestState
     data object Running : TestState
-    data class Ok(val reply: String) : TestState
+    /** [elapsedMs] 一并显示:挑模型时「通不通」之外最想知道的就是「快不快」。 */
+    data class Ok(val reply: String, val elapsedMs: Long) : TestState
     data class Failed(val message: String) : TestState
+}
+
+/** 「获取模型列表」的状态机。 */
+sealed interface ModelListState {
+    data object Idle : ModelListState
+    data object Loading : ModelListState
+    data class Loaded(val models: List<String>) : ModelListState
+    data class Failed(val message: String) : ModelListState
 }
 
 /** 底部提示条停留多久（不含淡出动画的时长）。 */
@@ -147,7 +156,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
      * 每次都把上一个计时器取消掉：连着弹两条时，不取消的话第一条的计时器会在
      * 第二条刚出来 0.几秒时把它一起清掉。
      */
-    private fun showToast(message: String) {
+    fun showToast(message: String) {
         toastJob?.cancel()
         _toast.value = message
         toastJob = viewModelScope.launch {
@@ -220,11 +229,44 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun afterConfigChange(before: AiConfig) {
         val after = config.value
-        if (before.provider != after.provider || before.endpoint != after.endpoint ||
-            before.apiKey != after.apiKey || before.model != after.model
-        ) {
-            clearTestState()
+        val sameServer = before.provider == after.provider && before.endpoint == after.endpoint &&
+            before.apiKey == after.apiKey
+        if (!sameServer || before.model != after.model) clearTestState()
+        // 模型列表只跟服务商、地址、Key 有关;选了列表里的某个模型不该把列表作废
+        if (!sameServer) dismissModelList()
+    }
+
+    private val _modelList = MutableStateFlow<ModelListState>(ModelListState.Idle)
+    val modelList: StateFlow<ModelListState> = _modelList.asStateFlow()
+
+    /** 同 [testGeneration]:拉取途中换了服务商/地址/Key,回来的列表就作废。 */
+    private var modelListGeneration = 0
+
+    fun fetchModels() {
+        if (_modelList.value == ModelListState.Loading) return
+        val cfg = config.value
+        if (!cfg.isUsable) {
+            _modelList.value = ModelListState.Failed("请先填写 API Key")
+            return
         }
+        val generation = ++modelListGeneration
+        _modelList.value = ModelListState.Loading
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { AiClient.listModels(cfg) } }
+            if (generation != modelListGeneration) return@launch
+            _modelList.value = result.fold(
+                onSuccess = {
+                    if (it.isEmpty()) ModelListState.Failed("服务商没有返回任何模型，请手动填写")
+                    else ModelListState.Loaded(it)
+                },
+                onFailure = { ModelListState.Failed("获取失败：" + AiClient.failureDetail(it)) }
+            )
+        }
+    }
+
+    fun dismissModelList() {
+        modelListGeneration++
+        _modelList.value = ModelListState.Idle
     }
 
     fun refreshStatus() {
@@ -265,6 +307,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                 _testState.value = TestState.Failed("请先填写 API Key")
                 return@launch
             }
+            val startedAt = System.currentTimeMillis()
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     AiClient.chat(
@@ -277,7 +320,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
             // 测试途中改了配置:这个结果测的是旧配置,丢掉,别把它挂在新配置下面
             if (generation != testGeneration) return@launch
             _testState.value = result.fold(
-                onSuccess = { TestState.Ok(it.trim().take(200)) },
+                onSuccess = { TestState.Ok(it.trim().take(200), System.currentTimeMillis() - startedAt) },
                 onFailure = { TestState.Failed(AiClient.failureDetail(it)) }
             )
         }
