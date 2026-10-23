@@ -2257,12 +2257,27 @@ class HookEntry : IXposedHookLoadPackage {
             val clazz = cl.loadClass(symbols.toastStreamPlayerClass)
             val instance = kotlinObjectInstance(clazz) ?: return false
             clazz.getMethod("stopPlay").invoke(instance)
+            resetPlayTtsConfig(clazz, instance)
             // speakTts 成功返回合成事件 id,文本为空时返回 null
             val speakId = clazz.getMethod("speakTts", String::class.java).invoke(instance, text)
             speakId != null
         } catch (t: Throwable) {
             Log.i(TAG, "speakViaToastPlayer failed: $t")
             false
+        }
+    }
+
+    // speakTts 优先用一份缓存的 TtsConfig,为空才按小爱的音色设置现建一份(建了也一直留着)。
+    // 小爱收到角色扮演/智能体/待机这类流式对话指令时,会用 setPlayTtsConfig 把服务端下发的
+    // 音色写进去,而且不一定清 —— 我们的答案就会用那个音色念,和设置里选的对不上;
+    // 待机时打上的 STANDBY 场景也会一直粘在上面。念之前置空,让它按当前设置重建。
+    // 卡片喇叭重播也走 speakTts,置空后重播我们的答案同样是设置里的音色。
+    private fun resetPlayTtsConfig(clazz: Class<*>, instance: Any) {
+        try {
+            clazz.methods.first { it.name == "setPlayTtsConfig" && it.parameterTypes.size == 1 }
+                .invoke(instance, null)
+        } catch (t: Throwable) {
+            Log.i(TAG, "reset play tts config failed: $t")
         }
     }
 
