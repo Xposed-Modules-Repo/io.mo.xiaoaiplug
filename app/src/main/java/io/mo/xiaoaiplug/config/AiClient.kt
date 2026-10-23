@@ -270,11 +270,21 @@ object AiClient {
         // 各阶段耗时。用户看到"这轮花了 7 秒"时,得能一眼分清是模型慢还是工具慢 ——
         // 早先只有一个总时长,只能拿 CHAT 和 TOOL 两条记录的时间戳倒推。
         val steps = ArrayList<Pair<String, Long>>()
+        val thinking = ThinkingTrace()
+        // 保持原来的流式/非流式选择，记录不受卡片「显示思考过程」开关影响。
+        val recordingSink = sink?.let { downstream ->
+            object : StreamSink by downstream {
+                override fun onThinking(text: String) {
+                    thinking.update(text)
+                    downstream.onThinking(text)
+                }
+            }
+        }
         return try {
-            val answer = chatInternal(config, userText, ctx, history, sink, allowMutating, steps)
+            val answer = chatInternal(config, userText, ctx, history, recordingSink, allowMutating, steps, thinking)
             LogClient.chat(
                 ctx, userText, answer, config.effectiveModel,
-                System.currentTimeMillis() - started, formatSteps(steps)
+                System.currentTimeMillis() - started, formatSteps(steps), thinking.text()
             )
             answer
         } catch (t: Throwable) {
@@ -282,7 +292,8 @@ object AiClient {
                 ctx,
                 "对话失败: ${failureDetail(t)}",
                 "问: $userText\n\n${t.stackTraceToString()}",
-                System.currentTimeMillis() - started
+                System.currentTimeMillis() - started,
+                thinking = thinking.text()
             )
             throw t
         }
@@ -301,7 +312,8 @@ object AiClient {
         history: List<ChatTurn>,
         sink: StreamSink?,
         allowMutating: () -> Boolean,
-        steps: MutableList<Pair<String, Long>>
+        steps: MutableList<Pair<String, Long>>,
+        thinking: ThinkingTrace
     ): String {
         val specs = Tools.allSpecs(config.enabledTools, config.mcpServers)
         val useNative = config.useNativeTools && nativeToolsSupported && specs.isNotEmpty()
@@ -342,6 +354,7 @@ object AiClient {
         // 上一轮有动作被 allowMutating 拦下:这轮动不了手,再给工具只会换着法子重试。
         var actionBlocked = false
         for (iter in 0 until MAX_TOOL_ITERATIONS) {
+            thinking.nextRound()
             // 第 0 轮还没有任何工具结果,不存在"凭已有结果作答",所以收尾轮最早从第 1 轮起。
             val forceAnswer = iter > 0 && (
                 actionBlocked ||
@@ -361,6 +374,7 @@ object AiClient {
             val reply = callModel(config, messages, if (useNative) specs else emptyList(), ctx, sink, forceAnswer)
             steps.add((if (forceAnswer) "模型(收尾)" else "模型") to System.currentTimeMillis() - modelAt)
             val responseText = AiResponseText.fromMessage(reply)
+            thinking.update(responseText.thinking)
             val content = responseText.answer
             if (responseText.thinking.isNotBlank()) sink?.onThinking(responseText.thinking)
 

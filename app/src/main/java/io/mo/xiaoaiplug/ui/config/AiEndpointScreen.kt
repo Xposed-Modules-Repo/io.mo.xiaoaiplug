@@ -184,7 +184,7 @@ fun AiEndpointScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
                     summary = "思考区域默认展开，内容可上下滑动，点击标题可收起"
                 )
                 Text(
-                    text = "需要模型和接口提供思考内容；此开关只控制显示。语音只播报最终答案。",
+                    text = "需要模型和接口提供思考内容；此开关只控制小爱卡片显示。返回的思考会保存到记录，可展开查看；语音只播报最终答案。",
                     fontSize = MiuixTheme.textStyles.footnote2.fontSize,
                     color = MiuixTheme.colorScheme.onBackgroundVariant,
                     modifier = Modifier.padding(horizontal = CardHorizontalPadding, vertical = 8.dp)

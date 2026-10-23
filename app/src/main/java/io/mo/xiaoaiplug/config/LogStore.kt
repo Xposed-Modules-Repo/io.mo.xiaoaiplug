@@ -18,17 +18,11 @@ class LogStore private constructor(context: Context) :
 
     companion object {
         private const val DB_NAME = "xiaoai_plug_logs.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
         private const val TABLE = "logs"
 
         /** 滚动上限:只保留最近这么多条。 */
         const val MAX_ROWS = 500
-
-        /**
-         * 单条 detail 的截断长度。工具输出上限是 Tools.MAX_TOOL_OUTPUT(6000),
-         * 留点余量够放参数和返回。500 条封顶算下来数据库最大几 MB,可以接受。
-         */
-        private const val MAX_DETAIL = 8000
 
         @Volatile
         private var instance: LogStore? = null
@@ -53,7 +47,8 @@ class LogStore private constructor(context: Context) :
                 title TEXT NOT NULL,
                 detail TEXT NOT NULL,
                 duration INTEGER NOT NULL,
-                ok INTEGER NOT NULL
+                ok INTEGER NOT NULL,
+                thinking TEXT NOT NULL DEFAULT ''
             )
             """.trimIndent()
         )
@@ -63,17 +58,20 @@ class LogStore private constructor(context: Context) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // 记录是纯诊断数据,不值得为它写迁移。表结构变了直接重建。
-        db.execSQL("DROP TABLE IF EXISTS $TABLE")
-        onCreate(db)
+        // 原位升级，保留用户已有记录；历史记录没有思考内容。
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE $TABLE ADD COLUMN thinking TEXT NOT NULL DEFAULT ''")
+        }
     }
 
     fun append(entry: LogEntry) {
+        val bounded = entry.bounded()
         val values = ContentValues().apply {
             put("time", entry.time)
             put("type", entry.type)
-            put("title", entry.title.take(MAX_DETAIL))
-            put("detail", entry.detail.take(MAX_DETAIL))
+            put("title", bounded.title)
+            put("detail", bounded.detail)
+            put("thinking", bounded.thinking)
             put("duration", entry.durationMs)
             put("ok", if (entry.ok) 1 else 0)
         }
@@ -92,7 +90,7 @@ class LogStore private constructor(context: Context) :
      * 按时间倒序查询。
      *
      * @param type 为 null 时不限类型
-     * @param keyword 在 title 和 detail 里模糊匹配,为空时不过滤
+     * @param keyword 在 title、detail 和 thinking 里模糊匹配,为空时不过滤
      */
     fun query(
         type: String? = null,
@@ -108,14 +106,15 @@ class LogStore private constructor(context: Context) :
         }
         if (!keyword.isNullOrBlank()) {
             if (where.isNotEmpty()) where.append(" AND ")
-            where.append("(title LIKE ? OR detail LIKE ?)")
+            where.append("(title LIKE ? OR detail LIKE ? OR thinking LIKE ?)")
             val like = "%${keyword.replace("%", "\\%").replace("_", "\\_")}%"
+            args.add(like)
             args.add(like)
             args.add(like)
         }
 
         val sql = buildString {
-            append("SELECT id, time, type, title, detail, duration, ok FROM $TABLE")
+            append("SELECT id, time, type, title, detail, duration, ok, thinking FROM $TABLE")
             if (where.isNotEmpty()) append(" WHERE ").append(where)
             append(" ORDER BY id DESC LIMIT ? OFFSET ?")
         }
@@ -133,7 +132,8 @@ class LogStore private constructor(context: Context) :
                         title = c.getString(3),
                         detail = c.getString(4),
                         durationMs = c.getLong(5),
-                        ok = c.getInt(6) != 0
+                        ok = c.getInt(6) != 0,
+                        thinking = c.getString(7)
                     )
                 )
             }

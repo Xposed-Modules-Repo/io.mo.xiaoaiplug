@@ -33,7 +33,8 @@ object LogClient {
         model: String,
         durationMs: Long,
         /** 各阶段耗时,形如 "模型 2.9s → 工具 0.8s → 模型 3.4s"。 */
-        breakdown: String = ""
+        breakdown: String = "",
+        thinking: String = ""
     ) {
         append(
             context,
@@ -49,7 +50,8 @@ object LogClient {
                     append("答: ").append(answer)
                 },
                 durationMs = durationMs,
-                ok = true
+                ok = true,
+                thinking = thinking
             )
         )
     }
@@ -80,7 +82,7 @@ object LogClient {
         )
     }
 
-    fun error(context: Context?, title: String, detail: String, durationMs: Long = -1L) {
+    fun error(context: Context?, title: String, detail: String, durationMs: Long = -1L, thinking: String = "") {
         append(
             context,
             LogEntry(
@@ -89,7 +91,8 @@ object LogClient {
                 title = title,
                 detail = detail,
                 durationMs = durationMs,
-                ok = false
+                ok = false,
+                thinking = thinking
             )
         )
     }
@@ -97,6 +100,7 @@ object LogClient {
     fun append(context: Context?, entry: LogEntry) {
         if (context == null) return
         val app = context.applicationContext ?: context
+        val bounded = entry.bounded()
         writer.execute {
             try {
                 app.contentResolver.call(
@@ -104,12 +108,13 @@ object LogClient {
                     ConfigProvider.METHOD_LOG_APPEND,
                     null,
                     Bundle().apply {
-                        putLong(ConfigProvider.LOG_TIME, entry.time)
-                        putString(ConfigProvider.LOG_TYPE, entry.type)
-                        putString(ConfigProvider.LOG_TITLE, entry.title)
-                        putString(ConfigProvider.LOG_DETAIL, entry.detail)
-                        putLong(ConfigProvider.LOG_DURATION, entry.durationMs)
-                        putBoolean(ConfigProvider.LOG_OK, entry.ok)
+                        putLong(ConfigProvider.LOG_TIME, bounded.time)
+                        putString(ConfigProvider.LOG_TYPE, bounded.type)
+                        putString(ConfigProvider.LOG_TITLE, bounded.title)
+                        putString(ConfigProvider.LOG_DETAIL, bounded.detail)
+                        putLong(ConfigProvider.LOG_DURATION, bounded.durationMs)
+                        putBoolean(ConfigProvider.LOG_OK, bounded.ok)
+                        putString(ConfigProvider.LOG_THINKING, bounded.thinking)
                     }
                 )
             } catch (t: Throwable) {

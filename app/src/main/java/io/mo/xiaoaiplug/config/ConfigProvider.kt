@@ -96,6 +96,7 @@ class ConfigProvider : ContentProvider() {
         const val LOG_TYPE = "log_type"
         const val LOG_TITLE = "log_title"
         const val LOG_DETAIL = "log_detail"
+        const val LOG_THINKING = "log_thinking"
         const val LOG_DURATION = "log_duration"
         const val LOG_OK = "log_ok"
 
@@ -275,7 +276,8 @@ class ConfigProvider : ContentProvider() {
                             title = extras.getString(LOG_TITLE).orEmpty(),
                             detail = extras.getString(LOG_DETAIL).orEmpty(),
                             durationMs = extras.getLong(LOG_DURATION, -1L),
-                            ok = extras.getBoolean(LOG_OK, true)
+                            ok = extras.getBoolean(LOG_OK, true),
+                            thinking = extras.getString(LOG_THINKING).orEmpty()
                         )
                     )
                     Bundle().apply { putBoolean("ok", true) }

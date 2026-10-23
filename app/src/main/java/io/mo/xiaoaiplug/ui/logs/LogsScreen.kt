@@ -5,7 +5,11 @@ import android.content.ClipboardManager
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
@@ -15,9 +19,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -32,6 +38,9 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -64,6 +73,13 @@ import kotlin.math.roundToInt
 
 private val TABS = listOf("全部", "对话", "工具", "错误")
 private val TAB_TYPES = listOf(null, LogEntry.TYPE_CHAT, LogEntry.TYPE_TOOL, LogEntry.TYPE_ERROR)
+
+private object ThinkingStyle {
+    val spacing = 8.dp
+    val minTouchHeight = 48.dp
+    const val damping = 1f
+    const val stiffness = 380f
+}
 
 @Composable
 fun LogsScreen(
@@ -183,7 +199,8 @@ private fun LogRow(
     onCopy: () -> Unit,
     onDelete: () -> Unit
 ) {
-    var expanded by remember { mutableStateOf(false) }
+    var expanded by rememberSaveable(entry.id) { mutableStateOf(false) }
+    var thinkingExpanded by rememberSaveable(entry.id) { mutableStateOf(false) }
     val time = remember(entry.time) {
         SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date(entry.time))
     }
@@ -299,6 +316,11 @@ private fun LogRow(
                         color = MiuixTheme.colorScheme.onBackgroundVariant,
                         modifier = Modifier.padding(top = 8.dp)
                     )
+                    if (entry.thinking.isNotBlank()) {
+                        ThinkingSection(entry.thinking, thinkingExpanded) {
+                            thinkingExpanded = !thinkingExpanded
+                        }
+                    }
                     // 反馈问题时要把详情发出去;只在展开后出现,收起时不占地方
                     TextButton(
                         text = "复制",
@@ -308,6 +330,46 @@ private fun LogRow(
                         modifier = Modifier.align(Alignment.End).padding(top = 8.dp)
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThinkingSection(thinking: String, expanded: Boolean, onToggle: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(top = ThinkingStyle.spacing)) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = ThinkingStyle.minTouchHeight)
+                .semantics { stateDescription = if (expanded) "已展开" else "已收起" }
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel = if (expanded) "收起思考过程" else "展开思考过程",
+                    onClick = onToggle
+                )
+                .padding(vertical = ThinkingStyle.spacing),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = if (expanded) "▾ 思考过程 · 收起" else "▸ 思考过程 · 展开",
+                fontSize = MiuixTheme.textStyles.footnote1.fontSize,
+                fontWeight = FontWeight.Medium,
+                color = MiuixTheme.colorScheme.onSurface
+            )
+        }
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(spring(ThinkingStyle.damping, ThinkingStyle.stiffness)),
+            exit = shrinkVertically(spring(ThinkingStyle.damping, ThinkingStyle.stiffness))
+        ) {
+            SelectionContainer {
+                Text(
+                    text = thinking,
+                    fontSize = MiuixTheme.textStyles.footnote1.fontSize,
+                    color = MiuixTheme.colorScheme.onSurface,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = ThinkingStyle.spacing)
+                )
             }
         }
     }
@@ -342,7 +404,9 @@ private fun copyEntry(context: Context, entry: LogEntry) {
         if (entry.durationMs >= 0) append(" · ").append(entry.durationMs).append("ms")
         if (!entry.ok) append(" · 失败")
     }
-    val text = listOf(head, entry.title, entry.detail).filter { it.isNotBlank() }.joinToString("\n\n")
+    val text = listOf(head, entry.title, entry.detail,
+        entry.thinking.takeIf { it.isNotBlank() }?.let { "思考过程:\n$it" }.orEmpty()
+    ).filter { it.isNotBlank() }.joinToString("\n\n")
     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     cm.setPrimaryClip(ClipData.newPlainText("xiaoai_plug_log", text))
 }

@@ -17,9 +17,24 @@ data class LogEntry(
     val detail: String,
     /** 耗时,毫秒;不适用时为 -1。 */
     val durationMs: Long = -1L,
-    val ok: Boolean = true
+    val ok: Boolean = true,
+    /** 接口返回的思考，独立保存；旧记录和未提供思考的模型为空。 */
+    val thinking: String = ""
 ) {
+    /** 在跨进程传输前限制大小，避免长思考导致整条记录丢失。 */
+    fun bounded(): LogEntry = copy(
+        title = title.take(MAX_DETAIL),
+        detail = detail.take(MAX_DETAIL),
+        thinking = if (thinking.length > MAX_THINKING) {
+            thinking.take(MAX_THINKING - TRUNCATED.length) + TRUNCATED
+        } else thinking
+    )
+
     companion object {
+        private const val MAX_DETAIL = 8000
+        internal const val MAX_THINKING = 64_000
+        private const val TRUNCATED = "\n\n[思考内容过长，后续已截断]"
+
         const val TYPE_CHAT = "CHAT"
         const val TYPE_TOOL = "TOOL"
         const val TYPE_ERROR = "ERROR"
