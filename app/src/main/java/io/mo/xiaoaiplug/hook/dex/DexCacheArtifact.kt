@@ -33,7 +33,8 @@ data class DexCacheArtifact(
     }
 
     companion object {
-        const val SCHEMA_VERSION = 7
+        // 8:新增可选符号 streamingTtsClass / miClawRegistryClass(边生成边播报)
+        const val SCHEMA_VERSION = 8
 
         /**
          * 模块交给小爱的扫描结果还能不能用。小爱进程里加载不了 libdexkit,自己扫必然失败,
@@ -58,9 +59,13 @@ data class DexCacheArtifact(
             val symbols = json.getJSONObject("symbols")
             val states = statesFromJson(json.getJSONObject("states").toString())
             // Partial handoffs carry only freshly verified names plus explicit disabled entries.
+            // 可选符号(不在 REQUIRED_KEYS 里)缺席等于未启用;一旦给了名字,同样必须有 MATCHED 状态撑腰。
             if (TargetSymbols().getDetailedList().any {
-                    symbols.opt(it.key) !is String || states[it.key] == null ||
-                        (states[it.key]?.state == SymbolState.MATCHED) != symbols.getString(it.key).isNotBlank()
+                    val required = it.key in DexScanResult.REQUIRED_KEYS
+                    val name = symbols.opt(it.key)
+                    if (name == null && !required) return@any false
+                    name !is String || (required && states[it.key] == null) ||
+                        (states[it.key]?.state == SymbolState.MATCHED) != name.isNotBlank()
                 }) return null
             val scan = DexScanResult(TargetSymbols.fromJson(symbols), states,
                 json.optString("error").takeIf { it.isNotBlank() })

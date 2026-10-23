@@ -165,6 +165,21 @@ object DexFingerprints {
                     .addParamType("android.content.Context").addParamType("java.lang.String")
                     .addParamType("int")))
         }
+        resolve("streamingTtsClass") {
+            // StreamingTextTtsManager:三段式流式合成的方法名都没混淆
+            classes(ClassMatcher.create()
+                .addMethod(MethodMatcher.create().name("onStreamStart").addParamType("java.lang.String")
+                    .returnType("java.lang.String"))
+                .addMethod(MethodMatcher.create().name("onTextReceived").addParamType("java.lang.String"))
+                .addMethod(MethodMatcher.create().name("onStreamFinish").paramCount(0)))
+                .filter { !it.contains('$') }
+        }
+        resolve("miClawRegistryClass") {
+            classes(ClassMatcher.create()
+                .addMethod(MethodMatcher.create().name("markMiClawResult").addParamType("java.lang.String"))
+                .addMethod(MethodMatcher.create().name("isMiClawResult").addParamType("java.lang.String")))
+                .filter { !it.contains('$') }
+        }
         return DexScanResult(TargetSymbols.fromJson(values), states.toMap())
     }
 }

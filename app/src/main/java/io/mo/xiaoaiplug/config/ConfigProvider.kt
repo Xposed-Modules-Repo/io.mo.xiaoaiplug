@@ -32,6 +32,8 @@ object ConfigKeys {
     const val SHOW_THINKING = "show_thinking"
     // 长回答自动播报只念开头(见 hook/BriefSpeech),卡片和重播仍是全文。默认关。
     const val SPEAK_BRIEF = "speak_brief"
+    // 边生成边播报(实验性,见 hook/StreamingSpeech)。默认关。
+    const val STREAM_SPEECH = "stream_speech"
 
     // 允许模型调用的工具名,逗号分隔。空串 = 全开。
     const val ENABLED_TOOLS = "enabled_tools"
@@ -57,7 +59,7 @@ object ConfigKeys {
         PROVIDER, ENDPOINT, API_KEY, MODEL, SYSTEM_PROMPT, ENABLED,
         BLOCK_VIEW_JUMP, JUMP_ALLOW_WORDS,
         BLOCK_WEB_SEARCH, WEB_SEARCH_ALLOW_WORDS,
-        SPEAK_ANSWER, SHOW_THINKING, SPEAK_BRIEF,
+        SPEAK_ANSWER, SHOW_THINKING, SPEAK_BRIEF, STREAM_SPEECH,
         ENABLED_TOOLS, SHELL_POLICY, USE_NATIVE_TOOLS, CONTEXT_ENABLED,
         SKIP_TAKEOVER_ENABLED, SKIP_TAKEOVER_PATTERN,
         AUTO_FIX_ACCESSIBILITY,

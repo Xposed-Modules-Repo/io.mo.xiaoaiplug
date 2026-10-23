@@ -66,6 +66,24 @@ class DexCacheArtifactTest {
             .forEach { assertFalse("Must invalidate $it", entry.matches(it)) }
     }
 
+    @Test fun optionalSymbolsMayBeAbsentButNeverUnbacked() {
+        // 可选符号(边生成边播报)缺席 = 未启用,不影响整份结果
+        val absent = artifact().toJson()
+        absent.getJSONObject("symbols").remove("streamingTtsClass")
+        assertNotNull(DexCacheArtifact.decode(absent.toString()))
+        // 给了名字却没有 MATCHED 状态撑腰:拒绝
+        val unbacked = artifact().toJson()
+        unbacked.getJSONObject("symbols").put("streamingTtsClass", "xf1.z1")
+        assertNull(DexCacheArtifact.decode(unbacked.toString()))
+        // 命中的可选符号原样往返
+        val matched = artifact().copy(scan = complete().copy(
+            symbols = complete().symbols.copy(streamingTtsClass = "xf1.z1"),
+            states = complete().states + ("streamingTtsClass" to SymbolScan(SymbolState.MATCHED))))
+        assertEquals(matched, DexCacheArtifact.decode(matched.toJson().toString()))
+        // 可选符号没命中不影响「全部验证通过」
+        assertTrue(complete().cacheable)
+    }
+
     @Test fun oldSchemasAndMalformedJsonAreRejected() {
         assertNull(DexCacheArtifact.decode("{broken"))
         assertNull(DexCacheArtifact.decode(null))

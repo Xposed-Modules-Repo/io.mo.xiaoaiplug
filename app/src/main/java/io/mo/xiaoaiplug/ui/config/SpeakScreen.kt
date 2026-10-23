@@ -39,6 +39,26 @@ fun SpeakScreen(vm: ConfigViewModel, bottomInset: Dp, onBack: () -> Unit) {
             }
         }
 
+        item { SmallTitle("开口速度") }
+        item {
+            Card(Modifier.fillMaxWidth()) {
+                SwitchPreference(
+                    checked = config.streamSpeech,
+                    onCheckedChange = { on -> vm.update { it.copy(streamSpeech = on) } },
+                    title = "边生成边播报（实验性）",
+                    summary = "答案还在生成时，整句一出来就开始念",
+                    enabled = config.speakAnswer
+                )
+                Text(
+                    text = "用的是小爱自己的流式语音，需要小爱界面在前台；条件不满足时自动退回整段播报。" +
+                        "模型调用工具前说的话（如「我查一下」）也会被念出来。",
+                    fontSize = MiuixTheme.textStyles.footnote2.fontSize,
+                    color = MiuixTheme.colorScheme.onBackgroundVariant,
+                    modifier = Modifier.padding(horizontal = CardHorizontalPadding, vertical = 8.dp)
+                )
+            }
+        }
+
         item { SmallTitle("长回答") }
         item {
             Card(Modifier.fillMaxWidth()) {

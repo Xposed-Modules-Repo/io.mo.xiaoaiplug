@@ -25,7 +25,11 @@ data class TargetSymbols(
     val flowToastCardClass: String = "",
     val flowControllerClass: String = "",
     val floatManagerClass: String = "",
-    val settingsSwitchClass: String = ""
+    val settingsSwitchClass: String = "",
+    // 下面两个是可选符号(不在 DexScanResult.REQUIRED_KEYS 里):只给「边生成边播报」用,
+    // 没命中就退回整段播报,不影响其它功能和主页的「全部验证通过」。
+    val streamingTtsClass: String = "",
+    val miClawRegistryClass: String = ""
 ) {
 
     fun toJson(): JSONObject = JSONObject().apply {
@@ -48,6 +52,8 @@ data class TargetSymbols(
         put("flowControllerClass", flowControllerClass)
         put("floatManagerClass", floatManagerClass)
         put("settingsSwitchClass", settingsSwitchClass)
+        put("streamingTtsClass", streamingTtsClass)
+        put("miClawRegistryClass", miClawRegistryClass)
     }
 
     fun getDetailedList(): List<SymbolDetail> = listOf(
@@ -69,7 +75,9 @@ data class TargetSymbols(
         SymbolDetail("flowToastCardClass", "流式结果卡片", "自建或接管的答案上屏 Toast 卡片", flowToastCardClass),
         SymbolDetail("flowControllerClass", "全屏结果流控制器", "全屏主界面卡片渲染容器 (addCard)", flowControllerClass),
         SymbolDetail("floatManagerClass", "悬浮窗管理器", "悬浮窗模式卡片渲染容器 (addCard)", floatManagerClass),
-        SymbolDetail("settingsSwitchClass", "系统开关工具", "拦截接管轮次里小爱自己执行的手电筒 / Wi-Fi / 勿扰等开关 (SettingsUtil.change)", settingsSwitchClass)
+        SymbolDetail("settingsSwitchClass", "系统开关工具", "拦截接管轮次里小爱自己执行的手电筒 / Wi-Fi / 勿扰等开关 (SettingsUtil.change)", settingsSwitchClass),
+        SymbolDetail("streamingTtsClass", "流式文本 TTS（可选）", "边生成边播报：在 stream_synthesize 音轨上流式合成 (StreamingTextTtsManager)", streamingTtsClass),
+        SymbolDetail("miClawRegistryClass", "MiClaw 结果登记（可选）", "边生成边播报：流式 TTS 只认登记过的对话 (markMiClawResult)", miClawRegistryClass)
     )
 
     companion object {
@@ -94,7 +102,9 @@ data class TargetSymbols(
                 flowToastCardClass = json.optString("flowToastCardClass", defaults.flowToastCardClass),
                 flowControllerClass = json.optString("flowControllerClass", defaults.flowControllerClass),
                 floatManagerClass = json.optString("floatManagerClass", defaults.floatManagerClass),
-                settingsSwitchClass = json.optString("settingsSwitchClass", defaults.settingsSwitchClass)
+                settingsSwitchClass = json.optString("settingsSwitchClass", defaults.settingsSwitchClass),
+                streamingTtsClass = json.optString("streamingTtsClass", defaults.streamingTtsClass),
+                miClawRegistryClass = json.optString("miClawRegistryClass", defaults.miClawRegistryClass)
             )
         }
     }

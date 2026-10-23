@@ -11,6 +11,8 @@ import io.mo.xiaoaiplug.config.ConfigClient
 import io.mo.xiaoaiplug.hook.SettingsHook
 import io.mo.xiaoaiplug.hook.ReplyTurns
 import io.mo.xiaoaiplug.hook.BriefSpeech
+import io.mo.xiaoaiplug.hook.SpeechChunker
+import io.mo.xiaoaiplug.hook.StreamingSpeech
 import io.mo.xiaoaiplug.hook.ReplyCards
 import io.mo.xiaoaiplug.hook.ReplyPresentation
 import io.mo.xiaoaiplug.hook.ReplyTextRenderer
@@ -40,6 +42,10 @@ private const val SETTINGS_PKG = "com.android.settings"
 // 我们自己的答案播在这条音轨上(n1.speakTts 用的),静音时必须跳过它。
 // 其余的(main / tts / getAuthorization / getNoAccountAuthorization)都是小爱在说话。
 private const val OUR_AUDIO_TRACK = "toastStreamTts"
+
+// 「边生成边播报」开着时我们也在这条音轨上说话(StreamingTextTtsManager 的 stream_synthesize)。
+// 只在这轮的流式播报真开起来以后才放行,平时它是小爱/MiClaw 的流式 TTS,照样要掐。
+private const val STREAM_AUDIO_TRACK = "stream_synthesize"
 
 // ASR 指令处理器。小爱把语音识别结果(SpeechRecognizer.RecognizeResult)交给它,
 // 终态结果(isFinal=true)带着 dialogId 和问话原文。
@@ -266,6 +272,12 @@ class HookEntry : IXposedHookLoadPackage {
     private val STREAM_RENDER_INTERVAL_MS = 60L
     @Volatile private var activeReplyPresentation: Pair<String, ReplyPresentation>? = null
 
+    /** 这一轮的「边生成边播报」。新一轮开始或用户打断时停掉,但对象留着,供音轨放行判断。 */
+    @Volatile private var activeSpeech: Pair<String, StreamingSpeech>? = null
+
+    /** 标记"这次 StreamingTextTtsManager 调用是我们自己发的",守卫 hook 据此放行。 */
+    private val ourStreamCall = ThreadLocal.withInitial { false }
+
     // 历史库改写:拦下小爱自己那句兜底文案,等我们的答案到了再写进去。
     // 实测一次交互里 recordToSpeak 会被连调十来次(同一句插了 11 行),所以压制按对话维度
     // (DialogSession.historyPending)、写入用 DialogSession.historyWritten 保证只写一次。
@@ -361,6 +373,7 @@ class HookEntry : IXposedHookLoadPackage {
         hookOperationManager(cl)
         hookNativeAudio(cl)
         hookAuthoritativeText(cl)
+        hookStreamingTts(cl)
         hookBridge(cl)
         hookCardBaseDiagnostic(cl)
         hookSettingsJump(cl)
@@ -1973,37 +1986,56 @@ class HookEntry : IXposedHookLoadPackage {
     // 主路径 n1.speakTts 播在 TOAST_STREAM_TTS 音轨上,和静音泵掐的主音轨互不干扰,
     // 所以泵可以一直跑着,不用为了让我们开口而放开对小爱的钳制。
     private fun speakAnswer(key: String, answer: String) {
-        if (!replyTurns.isCurrent(key)) return
-        val cfg = lastConfig ?: return
-        if (!cfg.enabled || !cfg.speakAnswer) return
+        // 这轮开着的流式播报不管从哪个分支结束都要收掉:开着不关,StreamingTextTtsManager
+        // 每 4 秒发一次心跳,一直挂到下一轮。
+        val speech = activeSpeech?.takeIf { it.first == key }?.second
+        if (!trySpeakAnswer(key, answer, speech)) closeSpeech(speech)
+    }
+
+    /** @return 是否已经接手了播报(含收掉流式播报);false 时调用方负责收流。 */
+    private fun trySpeakAnswer(key: String, answer: String, speech: StreamingSpeech?): Boolean {
+        if (!replyTurns.isCurrent(key)) return false
+        val cfg = lastConfig ?: return false
+        if (!cfg.enabled || !cfg.speakAnswer) return false
         // 只念我们真正接管了的对话 —— 没拦下小爱的话,它自己已经在说了,再念就是两个人抢话。
         // 这次问话名下任何一个 dialogId 被接管,就算接管。
         val dialogIds = utteranceDialogs[key].orEmpty()
         if (dialogIds.none { isOurs(it) }) {
             Log.i(TAG, "not taken over, skip speaking key=$key")
-            return
+            return false
         }
         // 一次问话只出一次声。同一句话的多个 dialogId 走到这里只有第一个能过。
         if (!spokenUtterances.add(key)) {
             Log.i(TAG, "already spoken, skip key=$key")
-            return
+            return false
         }
-        val dialogId = dialogIds.firstOrNull { isOurs(it) } ?: return
+        val dialogId = dialogIds.firstOrNull { isOurs(it) } ?: return false
 
         val speakable = toSpeakable(answer)
         if (speakable.isBlank()) {
             Log.i(TAG, "nothing speakable after cleanup key=$key")
             spokenUtterances.remove(key)
-            return
+            return false
         }
-        val cl = targetClassLoader ?: return
+        val cl = targetClassLoader ?: return false
+        // 流式那边还没念的部分。在这个线程算:切句状态只在模型调用线程上动。
+        val tail = speech?.chunker?.onComplete(answer)
         Handler(Looper.getMainLooper()).post {
-            if (!replyTurns.isCurrent(key)) return@post
-            // 先掐掉小爱可能还在念的兜底话术,再开口,避免两句话叠在一起
-            muteAudio()
+            if (!replyTurns.isCurrent(key)) {
+                speech?.finishOnMain("")
+                return@post
+            }
             // 不管念得成不成,都要把 b2 换成我们的文本:否则用户点卡片右下角喇叭
             // 重播时放的仍是小爱的原始答案,声音和屏幕上的字对不上。
             syncSpeakContent(cl, dialogId, speakable)
+            // 边生成边播报:前面的整句已经念出去了,这里只补尾巴、收流。
+            // 流没开起来(小爱不在前台、被小爱的 TTS 设置拒绝、符号没命中)就往下走整段播报。
+            if (speech?.finishOnMain(tail.orEmpty()) == StreamingSpeech.Outcome.HANDLED) {
+                Log.i(TAG, "spoke answer via stream speech dialogId=$dialogId")
+                return@post
+            }
+            // 先掐掉小爱可能还在念的兜底话术,再开口,避免两句话叠在一起
+            muteAudio()
             // 「长回答只念开头」只作用于这次自动播报;上面写进 SpeakContent 的仍是全文,
             // 用户想听完整的,点卡片喇叭重播就是全文。
             val spoken = if (cfg.speakBrief) BriefSpeech.cut(speakable) else speakable
@@ -2014,6 +2046,72 @@ class HookEntry : IXposedHookLoadPackage {
             // 主引擎可能已销毁且 speak() 会静默返回；释放拦截还会让原生回答重新开口。
             Log.w(TAG, "Toast TTS unavailable; answer remains on card key=$key dialogId=$dialogId")
             spokenUtterances.remove(key)
+        }
+        return true
+    }
+
+    /** 不念了,但流式播报要是开着得收掉(结束这条流,已经念出去的照常念完)。 */
+    private fun closeSpeech(speech: StreamingSpeech?) {
+        speech ?: return
+        Handler(Looper.getMainLooper()).post { speech.finishOnMain("") }
+    }
+
+    /** 这轮流式播报真开起来了:它那条音轨要放行,不能被静音泵掐掉。 */
+    private fun streamAudioAllowed(): Boolean {
+        val (key, speech) = activeSpeech ?: return false
+        return replyTurns.isCurrent(key) &&
+            (speech.state == StreamingSpeech.State.STARTED || speech.state == StreamingSpeech.State.FINISHED)
+    }
+
+    /**
+     * 这轮在用(或准备用)小爱的流式 TTS:小爱自己(RN 卡片、MiClaw)对它的调用要挡掉。
+     * 它是单例 —— 别人一调 onStreamStart 就把会话抢走,调 onStreamFinish 会把我们的流提前收掉。
+     */
+    private fun streamGuardActive(): Boolean {
+        val (key, speech) = activeSpeech ?: return false
+        return replyTurns.isCurrent(key) &&
+            speech.state != StreamingSpeech.State.FAILED && speech.state != StreamingSpeech.State.STOPPED
+    }
+
+    private fun newStreamingSpeech(config: AiConfig): StreamingSpeech? {
+        if (!config.enabled || !config.speakAnswer || !config.streamSpeech) return null
+        val cl = targetClassLoader ?: return null
+        if (symbols.streamingTtsClass.isBlank() || symbols.miClawRegistryClass.isBlank()) {
+            Log.i(TAG, "stream speech symbols unavailable, falling back to whole-answer speech")
+            return null
+        }
+        return StreamingSpeech(
+            cl, symbols.streamingTtsClass, symbols.miClawRegistryClass,
+            SpeechChunker(brief = config.speakBrief, maxChars = MAX_SPEAK_CHARS),
+            clean = ::cleanForSpeech,
+            beforeStart = ::muteAudio,
+            instanceOf = ::kotlinObjectInstance,
+            ourCall = ourStreamCall
+        )
+    }
+
+    /** 流式播报能不能开口:接管信号常比模型的第一句话晚到,没确认接管前先攒着不念。 */
+    private fun canStreamSpeak(key: String): Boolean =
+        replyTurns.isCurrent(key) && utteranceDialogs[key].orEmpty().any { isOurs(it) }
+
+    private fun hookStreamingTts(cl: ClassLoader) {
+        val name = symbols.streamingTtsClass
+        if (name.isBlank()) return
+        try {
+            val clazz = cl.loadClass(name)
+            val guarded = setOf("onStreamStart", "onTextReceived", "onStreamFinish")
+            val methods = clazz.declaredMethods.filter { it.name in guarded }
+            for (method in methods) {
+                XposedBridge.hookMethod(method, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (ourStreamCall.get() == true || !streamGuardActive()) return
+                        param.result = null
+                    }
+                })
+            }
+            Log.i(TAG, "hooked streaming tts guard $name: ${methods.size} methods")
+        } catch (t: Throwable) {
+            Log.w(TAG, "streaming tts guard unavailable: $t")
         }
     }
 
@@ -2052,6 +2150,8 @@ class HookEntry : IXposedHookLoadPackage {
                         if (!isMutePumpActive()) return
                         try {
                             if (param.thisObject === getTrack.invoke(null, OUR_AUDIO_TRACK)) return
+                            if (streamAudioAllowed() &&
+                                param.thisObject === getTrack.invoke(null, STREAM_AUDIO_TRACK)) return
                             param.result = null
                         } catch (t: Throwable) {
                             Log.w(TAG, "native audio guard failed: $t")
@@ -2108,6 +2208,11 @@ class HookEntry : IXposedHookLoadPackage {
 
     // 当用户返回桌面、关闭浮窗或卡片被移出屏幕时,立即终止 TTS 播报(对齐小爱原生行为)
     private fun stopOurTts() {
+        // 0. 边生成边播报:停流(音轨由下面第 3 步一起掐)。停掉之后它的音轨不再放行。
+        activeSpeech?.second?.let { speech ->
+            if (Looper.myLooper() == Looper.getMainLooper()) speech.stopOnMain()
+            else Handler(Looper.getMainLooper()).post { speech.stopOnMain() }
+        }
         try {
             val cl = targetClassLoader ?: return
             // 1. 停止大模型专属 ToastStreamPlayer (wf1.v1)
@@ -2184,6 +2289,12 @@ class HookEntry : IXposedHookLoadPackage {
     // 把 markdown 答案压成适合朗读的纯文本。
     // 代码块整段丢掉(念代码毫无意义),链接只留锚文本,各种标记符去掉,最后限长。
     private fun toSpeakable(raw: String): String {
+        val s = cleanForSpeech(raw)
+        return if (s.length <= MAX_SPEAK_CHARS) s else s.take(MAX_SPEAK_CHARS).trimEnd('，') + "……详细内容请看屏幕"
+    }
+
+    /** 去掉念出来是噪音的东西(markdown、链接、代码块),不截断。流式播报按段调它。 */
+    private fun cleanForSpeech(raw: String): String {
         var s = raw
         s = s.replace(Regex("```.*?```", RegexOption.DOT_MATCHES_ALL), " ")   // 围栏代码块
         s = s.replace(Regex("`([^`]*)`"), "$1")                               // 行内代码
@@ -2199,7 +2310,7 @@ class HookEntry : IXposedHookLoadPackage {
         s = s.replace(Regex("[ \\t]+"), " ")
         s = s.replace(Regex("\\s*\\n\\s*"), "，")   // 换行读成停顿,别让 TTS 一口气连读
         s = s.replace(Regex("，{2,}"), "，").trim().trim('，')
-        return if (s.length <= MAX_SPEAK_CHARS) s else s.take(MAX_SPEAK_CHARS).trimEnd('，') + "……详细内容请看屏幕"
+        return s
     }
 
     // 静音:停掉**除我们自己那条之外**的所有音轨。
@@ -2220,6 +2331,7 @@ class HookEntry : IXposedHookLoadPackage {
             var stopped = 0
             for ((name, track) in tracks) {
                 if (name == OUR_AUDIO_TRACK) continue   // 那是我们自己在说话
+                if (name == STREAM_AUDIO_TRACK && streamAudioAllowed()) continue   // 边生成边播报
                 if (stopTrack(track)) stopped++
             }
             Log.i(TAG, "muted $stopped/${tracks.size} audio tracks (kept $OUR_AUDIO_TRACK)")
@@ -2298,10 +2410,15 @@ class HookEntry : IXposedHookLoadPackage {
         }
     }
 
-    private fun streamSinkFor(key: String, showThinking: Boolean): AiClient.StreamSink {
+    private fun streamSinkFor(key: String, config: AiConfig): AiClient.StreamSink {
+        val showThinking = config.showThinking
         val presentation = ReplyPresentation(showThinking)
+        val speech = newStreamingSpeech(config)
         synchronized(replyTurns) {
-            if (replyTurns.isCurrent(key)) activeReplyPresentation = key to presentation
+            if (replyTurns.isCurrent(key)) {
+                activeReplyPresentation = key to presentation
+                if (speech != null) activeSpeech = key to speech
+            }
         }
         // 占位卡可能早于请求创建且尚未绑定视图；先关联状态，迟到绑定也能折叠/展开。
         replyCards.get(key)?.let { cardPresentations[it] = presentation }
@@ -2323,16 +2440,21 @@ class HookEntry : IXposedHookLoadPackage {
                 render()
             }
             override fun onDelta(text: String) {
+                // 边生成边播报:整句一出来就交出去(切句器自己会停在工具标记前)
+                speech?.let { it.speak(it.chunker.onDelta(text, canStreamSpeak(key))) }
                 // 工具标记不进正文；即使节流跳帧，也保留最新状态供迟到的卡片读取。
                 if (text.isBlank() || text.contains("<tool_call")) return
                 presentation.onAnswer(text)
                 render()
             }
             override fun onComplete(text: String) {
+                // 只交整句;最后半句和收流在 speakAnswer 里做(失败的轮次走不到这里)
+                speech?.let { it.speak(it.chunker.onDelta(text, canStreamSpeak(key))) }
                 presentation.onComplete(text)
                 render(force = true)
             }
             override fun onDiscard() {
+                speech?.chunker?.onDiscard()
                 presentation.onDiscard()
                 render(force = true)
             }
@@ -2394,7 +2516,7 @@ class HookEntry : IXposedHookLoadPackage {
                 // 流式已重开:此前工具全挂是因为 arguments/name 的 JSON null 被 optString 拼成
                 // 字面量 "null" 毁了参数(已加 isNull 防护)。带着调试日志一起放出去,真机核对。
                 val answer = AiClient.chat(
-                    config, queryText, currentApplicationContext(), history, streamSinkFor(key, config.showThinking)
+                    config, queryText, currentApplicationContext(), history, streamSinkFor(key, config)
                 ) {
                     replyTurns.isCurrent(key) && utteranceDialogs[key].orEmpty().any { isOurs(it) }
                 }
